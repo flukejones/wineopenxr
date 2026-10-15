@@ -77,6 +77,14 @@ FUNCTION_POLICIES = {
     "xrEndFrame": ThunkPolicy(pe=MANUAL, unix=MANUAL),
 
     "xrGetD3D11GraphicsRequirementsKHR": ThunkPolicy(pe=MANUAL, unix=MANUAL, dispatch=False),
+    "xrGetVulkanGraphicsRequirementsKHR": ThunkPolicy(pe=MANUAL, unix=SKIP, dispatch=False),
+    "xrGetVulkanGraphicsRequirements2KHR": ThunkPolicy(pe=MANUAL, unix=SKIP, dispatch=False),
+    "xrGetVulkanInstanceExtensionsKHR": ThunkPolicy(pe=MANUAL, unix=SKIP, dispatch=False),
+    "xrGetVulkanDeviceExtensionsKHR": ThunkPolicy(pe=MANUAL, unix=SKIP, dispatch=False),
+    "xrGetVulkanGraphicsDeviceKHR": ThunkPolicy(pe=MANUAL, unix=SKIP, dispatch=False),
+    "xrGetVulkanGraphicsDevice2KHR": ThunkPolicy(pe=MANUAL, unix=SKIP, dispatch=False),
+    "xrCreateVulkanInstanceKHR": ThunkPolicy(pe=MANUAL, unix=SKIP, dispatch=False),
+    "xrCreateVulkanDeviceKHR": ThunkPolicy(pe=MANUAL, unix=SKIP, dispatch=False),
     "xrConvertTimeToWin32PerformanceCounterKHR": ThunkPolicy(pe=MANUAL, unix=MANUAL, dispatch=False),
     "xrConvertWin32PerformanceCounterToTimeKHR": ThunkPolicy(pe=MANUAL, unix=MANUAL, dispatch=False),
 
@@ -87,6 +95,8 @@ FUNCTION_POLICIES = {
 
 SUPPORTED_EXTENSIONS = frozenset({
     "XR_KHR_D3D11_enable",
+    "XR_KHR_vulkan_enable",
+    "XR_KHR_vulkan_enable2",
     "XR_KHR_win32_convert_performance_counter_time",
     "XR_KHR_visibility_mask",
     "XR_KHR_composition_layer_depth",
@@ -111,6 +121,10 @@ CUSTOM_UNIX_CALLS = (
     "create_d3d11_session",
     "release_metal_session",
     "export_metal_textures",
+    "vulkan_requirements",
+    "vulkan_physical_device",
+    "create_vulkan_session",
+    "import_vulkan_texture",
 )
 
 UNSUPPORTED_TYPES = frozenset({"wchar_t"})
@@ -124,12 +138,13 @@ REGISTRY_SUPPORTED_REQUIRES = frozenset({
 })
 
 D3D11_GUARD = "XR_USE_GRAPHICS_API_D3D11"
+VULKAN_GUARD = "XR_USE_GRAPHICS_API_VULKAN"
 METAL_GUARD = "XR_USE_GRAPHICS_API_METAL"
 WIN32_GUARD = "XR_USE_PLATFORM_WIN32"
 TIMESPEC_GUARD = "XR_USE_TIMESPEC"
 
-PE_GUARDS = frozenset({None, D3D11_GUARD, WIN32_GUARD})
-GUARD_ORDER = (D3D11_GUARD, METAL_GUARD, WIN32_GUARD, TIMESPEC_GUARD)
+PE_GUARDS = frozenset({None, D3D11_GUARD, VULKAN_GUARD, WIN32_GUARD})
+GUARD_ORDER = (D3D11_GUARD, VULKAN_GUARD, METAL_GUARD, WIN32_GUARD, TIMESPEC_GUARD)
 
 WRAPPED_HANDLES = {
     "XrInstance":  ("wine_instance_from_handle",  "host_instance"),
@@ -656,6 +671,7 @@ def emit_pe_thunks_c(plan):
     out.append("#include <windows.h>")
     out.append("")
     out.append(f"#define {D3D11_GUARD}")
+    out.append(f"#define {VULKAN_GUARD}")
     out.append(f"#define {WIN32_GUARD}")
     out.append("")
     out.append('#include "bridge.h"')

@@ -4,6 +4,7 @@ project(wineopenxr C OBJC)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 
 set(WINE_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/extern/wine/include")
+set(VULKAN_HEADERS_DIR "${CMAKE_SOURCE_DIR}/../Vulkan-Headers/include" CACHE PATH "Pinned Vulkan headers")
 
 set(DYNAMIC_LOADER OFF CACHE BOOL "" FORCE)
 set(BUILD_WITH_SYSTEM_JSONCPP OFF CACHE BOOL "" FORCE)
@@ -38,6 +39,7 @@ ExternalProject_Add(wineopenxr_pe
         -DSIGN_BUILTIN_SCRIPT=${CMAKE_SOURCE_DIR}/scripts/sign_builtin.py
         -DPROJECT_INCLUDE_DIR=${CMAKE_SOURCE_DIR}/src/include
         -DOPENXR_SDK_INCLUDE_DIR=${CMAKE_SOURCE_DIR}/extern/OpenXR-SDK/include
+        -DVULKAN_HEADERS_DIR=${VULKAN_HEADERS_DIR}
         -DWINEOPENXR_DEF=${CMAKE_SOURCE_DIR}/wineopenxr.def
     BUILD_BYPRODUCTS "${CMAKE_BINARY_DIR}/src/pe/wineopenxr.dll"
     BUILD_ALWAYS TRUE

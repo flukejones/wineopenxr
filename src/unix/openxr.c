@@ -226,7 +226,13 @@ NTSTATUS wine_xrCreateInstance(void *args)
          extension_index++)
     {
         const char *extension_name = params->createInfo->enabledExtensionNames[extension_index];
-        new_list[translated_count++] = translate_app_extension_name(extension_name);
+        const char *translated = translate_app_extension_name(extension_name);
+        uint32_t existing;
+        for (existing = 0; existing < translated_count; existing++)
+            if (!strcmp(new_list[existing], translated))
+                break;
+        if (existing == translated_count)
+            new_list[translated_count++] = translated;
     }
 
     our_info = *params->createInfo;
@@ -364,7 +370,8 @@ NTSTATUS wine_xrEnumerateSwapchainFormats(void *args)
     translated_count = 0;
     for (i = 0; i < native_count; i++)
     {
-        int64_t dxgi = mtl_format_to_dxgi(native_formats[i]);
+        int64_t dxgi = wine_session->graphics_api == WINE_XR_VULKAN
+            ? mtl_format_to_vk(native_formats[i]) : mtl_format_to_dxgi(native_formats[i]);
         if (!dxgi)
             continue;
         if (params->formats && translated_count < params->formatCapacityInput)
@@ -374,7 +381,7 @@ NTSTATUS wine_xrEnumerateSwapchainFormats(void *args)
     free(native_formats);
 
     *params->formatCountOutput = translated_count;
-    TRACE("Translated %u MTLPixelFormats to %u DXGI formats\n",
+    TRACE("Translated %u MTLPixelFormats to %u application formats\n",
           native_count, translated_count);
 
     if (params->formats && translated_count > params->formatCapacityInput)
@@ -401,10 +408,14 @@ NTSTATUS wine_xrCreateSwapchain(void *args)
         return STATUS_SUCCESS;
     }
 
-    mtl_fmt = dxgi_format_to_mtl(params->createInfo->format);
+    mtl_fmt = wine_session->graphics_api == WINE_XR_VULKAN
+        ? vk_format_to_mtl(params->createInfo->format)
+        : dxgi_format_to_mtl(params->createInfo->format);
     if (!mtl_fmt)
     {
-        WARN("Unsupported DXGI format %lld\n", (long long)params->createInfo->format);
+        WARN("Unsupported %s format %lld\n",
+             wine_session->graphics_api == WINE_XR_VULKAN ? "Vulkan" : "DXGI",
+             (long long)params->createInfo->format);
         params->result = XR_ERROR_SWAPCHAIN_FORMAT_UNSUPPORTED;
         return STATUS_SUCCESS;
     }
@@ -412,7 +423,7 @@ NTSTATUS wine_xrCreateSwapchain(void *args)
     our_info = *params->createInfo;
     our_info.format = mtl_fmt;
 
-    TRACE("Translating DXGI %lld -> MTLPixelFormat %lld\n",
+    TRACE("Translating application format %lld -> MTLPixelFormat %lld\n",
           (long long)params->createInfo->format, (long long)mtl_fmt);
 
     params->result = funcs->p_xrCreateSwapchain(

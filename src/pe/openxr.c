@@ -2,6 +2,7 @@
 
 /* Must precede any header that includes openxr_platform.h */
 #define XR_USE_GRAPHICS_API_D3D11
+#define XR_USE_GRAPHICS_API_VULKAN
 #define XR_USE_PLATFORM_WIN32
 
 #include <stdlib.h>
@@ -354,7 +355,9 @@ static void session_teardown(struct wine_XrSession *session)
         struct wine_XrSwapchain *swapchain =
             CONTAINING_RECORD(link, struct wine_XrSwapchain, entry);
         next_link = link->next;
-        if (swapchain->images)
+        if (session->graphics_api == WINE_XR_VULKAN)
+            wine_destroy_vulkan_images(swapchain);
+        else if (swapchain->images)
             release_imported_d3d11_textures((XrSwapchainImageD3D11KHR *)swapchain->images,
                                             swapchain->image_count);
         free(swapchain->images);
@@ -366,6 +369,7 @@ static void session_teardown(struct wine_XrSession *session)
         ID3D11Fence_Release(session->gpu_fence);
 
     release_dxmt_refs(session);
+    wine_destroy_vulkan_session(session);
 
     if (session->mtl_command_queue || session->mtl_device)
     {
@@ -517,10 +521,14 @@ XrResult WINAPI xrCreateSession(XrInstance instance,
     struct wine_XrSession *wine_session;
     const XrBaseInStructure *chain;
     const XrGraphicsBindingD3D11KHR *d3d11_binding = NULL;
+    const XrGraphicsBindingVulkanKHR *vulkan_binding = NULL;
     XrSystemId queried;
     XrResult result;
 
     WINE_TRACE("instance=%p, createInfo=%p\n", wine_instance, createInfo);
+
+    if (!createInfo || !session)
+        return XR_ERROR_VALIDATION_FAILURE;
 
     /* Reject a second concurrent session up front. Checked again after
      * create_session_d3d11 to catch a race with xrDestroyInstance */
@@ -545,23 +553,29 @@ XrResult WINAPI xrCreateSession(XrInstance instance,
             d3d11_binding = (const XrGraphicsBindingD3D11KHR *)chain;
             break;
         }
+        if (chain->type == XR_TYPE_GRAPHICS_BINDING_VULKAN_KHR)
+        {
+            vulkan_binding = (const XrGraphicsBindingVulkanKHR *)chain;
+            break;
+        }
     }
 
-    if (!d3d11_binding)
+    if (!d3d11_binding && !vulkan_binding)
     {
         /* Probe systemId first so invalid systems return XR_ERROR_SYSTEM_INVALID
          * before the missing D3D11 binding error */
         result = result_with_system_id_precedence(
             instance, createInfo->systemId, XR_ERROR_GRAPHICS_DEVICE_INVALID);
         if (result == XR_ERROR_GRAPHICS_DEVICE_INVALID)
-            WINE_ERR("No D3D11 graphics binding in createInfo->next chain\n");
+            WINE_ERR("No D3D11 or Vulkan graphics binding in createInfo->next chain\n");
         else
             WINE_WARN("xrCreateSession failed: %d\n", result);
         return result;
     }
 
     EnterCriticalSection(&primary_session_lock);
-    queried = wine_instance->d3d11_requirements_queried_for;
+    queried = vulkan_binding ? wine_instance->vulkan_requirements_queried_for
+                             : wine_instance->d3d11_requirements_queried_for;
     LeaveCriticalSection(&primary_session_lock);
 
     if (queried != createInfo->systemId)
@@ -579,17 +593,20 @@ XrResult WINAPI xrCreateSession(XrInstance instance,
         return XR_ERROR_OUT_OF_MEMORY;
 
     wine_session->instance = wine_instance;
+    wine_session->graphics_api = vulkan_binding ? WINE_XR_VULKAN : WINE_XR_D3D11;
     InitializeCriticalSection(&wine_session->swapchain_lock);
     wine_session->swapchain_list.next = &wine_session->swapchain_list;
     wine_session->swapchain_list.prev = &wine_session->swapchain_list;
 
-    result = create_session_d3d11(wine_instance, d3d11_binding,
-                                  createInfo->systemId, wine_session);
+    result = vulkan_binding
+        ? wine_create_vulkan_session(wine_instance, vulkan_binding,
+                                      createInfo->systemId, wine_session)
+        : create_session_d3d11(wine_instance, d3d11_binding,
+                                createInfo->systemId, wine_session);
     if (result != XR_SUCCESS)
     {
         WINE_WARN("xrCreateSession failed: %d\n", result);
-        DeleteCriticalSection(&wine_session->swapchain_lock);
-        free(wine_session);
+        session_teardown(wine_session);
         return result;
     }
 
@@ -671,6 +688,8 @@ XrResult WINAPI xrCreateSwapchain(XrSession session,
     wine_swapchain->create_info.height = createInfo->height;
     wine_swapchain->create_info.arraySize = createInfo->arraySize;
     wine_swapchain->create_info.mipCount = createInfo->mipCount;
+    wine_swapchain->create_info.sampleCount = createInfo->sampleCount;
+    wine_swapchain->create_info.faceCount = createInfo->faceCount;
     wine_swapchain->create_info.format = createInfo->format;
     wine_swapchain->create_info.usageFlags = createInfo->usageFlags;
 
@@ -720,7 +739,9 @@ XrResult WINAPI xrDestroySwapchain(XrSwapchain swapchain)
     list_remove(&wine_swapchain->entry);
     LeaveCriticalSection(&wine_session->swapchain_lock);
 
-    if (wine_swapchain->images)
+    if (wine_session->graphics_api == WINE_XR_VULKAN)
+        wine_destroy_vulkan_images(wine_swapchain);
+    else if (wine_swapchain->images)
         release_imported_d3d11_textures((XrSwapchainImageD3D11KHR *)wine_swapchain->images,
                                         wine_swapchain->image_count);
     free(wine_swapchain->images);
@@ -738,6 +759,10 @@ XrResult WINAPI xrEnumerateSwapchainImages(XrSwapchain swapchain,
 {
     struct wine_XrSwapchain *wine_swapchain = wine_swapchain_from_handle(swapchain);
     struct wine_XrSession *wine_session = wine_swapchain->session;
+
+    if (wine_session->graphics_api == WINE_XR_VULKAN)
+        return wine_enumerate_vulkan_images(wine_swapchain, imageCapacityInput,
+                                             imageCountOutput, images);
 
     if (imageCapacityInput == 0)
     {
@@ -1230,6 +1255,42 @@ XrResult WINAPI xrGetD3D11GraphicsRequirementsKHR(XrInstance instance,
         LeaveCriticalSection(&primary_session_lock);
     }
     return params.result;
+}
+
+XrResult WINAPI xrGetVulkanGraphicsRequirementsKHR(XrInstance instance,
+                                                    XrSystemId systemId,
+                                                    XrGraphicsRequirementsVulkanKHR *requirements)
+{
+    struct vulkan_requirements_params params = {
+        .instance = instance, .system_id = systemId, .requirements = requirements,
+    };
+    NTSTATUS status;
+
+    if (!requirements || requirements->type != XR_TYPE_GRAPHICS_REQUIREMENTS_VULKAN_KHR)
+        return XR_ERROR_VALIDATION_FAILURE;
+    status = UNIX_CALL(vulkan_requirements, &params);
+    if (status)
+    {
+        WINE_ERR("Vulkan requirements unix call failed: 0x%x\n", (unsigned)status);
+        return XR_ERROR_RUNTIME_FAILURE;
+    }
+    if (params.result == XR_SUCCESS)
+    {
+        params.result = wine_vulkan_api_version(&requirements->maxApiVersionSupported);
+        if (params.result != XR_SUCCESS)
+            return params.result;
+        EnterCriticalSection(&primary_session_lock);
+        wine_instance_from_handle(instance)->vulkan_requirements_queried_for = systemId;
+        LeaveCriticalSection(&primary_session_lock);
+    }
+    return params.result;
+}
+
+XrResult WINAPI xrGetVulkanGraphicsRequirements2KHR(XrInstance instance,
+                                                     XrSystemId systemId,
+                                                     XrGraphicsRequirementsVulkanKHR *requirements)
+{
+    return xrGetVulkanGraphicsRequirementsKHR(instance, systemId, requirements);
 }
 
 XrResult WINAPI xrConvertTimeToWin32PerformanceCounterKHR(XrInstance instance,

@@ -1,90 +1,52 @@
-# wineopenxr
+# WineOpenXR
 
-> [!WARNING]
-> This is a vibe-coded OpenXR bridge for running D3D11 OpenXR apps on macOS through CrossOver. It works but has not been thoroughly tested. Use at your own risk.
+WineOpenXR runs Windows OpenXR applications against a native Metal OpenXR runtime.
+It supports D3D11 through DXMT and Vulkan through CrossOver's MoltenVK driver.
 
-The bridge supports apps that:
-
-* Use OpenXR
-* Use D3D11
-* Run under Wine on Linux (if an app doesn't run there, it's unlikely to run here)
-
-## How it works
-
-wineopenxr forwards every call from an OpenXR D3D11 app to a native OpenXR runtime on the host. D3D11 swapchain textures are shared with the host runtime as `MTLTexture` handles without a GPU copy. DXMT's `IMTLD3D11InteropDevice` handles the D3D11 to Metal interop on the PE side.
-
-```
-OpenXR D3D11 app
-        |
-        v
-  wineopenxr.dll
-        |
-        v
-  wineopenxr.so
-        |
-        v
-Native OpenXR runtime
+```mermaid
+flowchart LR
+    D[D3D11 application] --> DX[DXMT]
+    V[Vulkan application] --> WV[Wine Vulkan / MoltenVK]
+    DX --> B[WineOpenXR]
+    WV --> B
+    B --> M[Native Metal OpenXR runtime]
 ```
 
-The bridge ships as two halves. `wineopenxr.dll` runs as a Wine PE builtin inside the Windows process. `wineopenxr.so` runs on the host side (x86_64 under Rosetta) and talks to the native OpenXR loader. They communicate through Wine's `__wine_unix_call_dispatcher`.
+Swapchain textures share GPU storage. Vulkan images are created once around the
+runtime's Metal textures. The native session uses the application's Metal command
+queue, so submitted rendering precedes runtime composition without a CPU GPU wait.
 
-## Prerequisites
+## Requirements
 
-* macOS 15+ on Apple Silicon
-* Xcode with the Metal toolchain
-* CrossOver 26 with the [DXMT fork](https://github.com/monofunc/dxmt) installed and selected as Graphics in your bottle
-* An x86_64 OpenXR runtime that exposes `XR_KHR_metal_enable`, such as the [Monado fork](https://github.com/monofunc/monado)
+- macOS on Apple Silicon, with Rosetta for the x86_64 host bridge.
+- D3D11: DXMT's `IMTLD3D11InteropDevice`.
+- Vulkan: CrossOver 26.3.0, Wine build `wine-11.0-8726-g2e2f5fca349`.
+  The bridge verifies this private Wine handle ABI before unwrapping handles.
+- Vulkan: `MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=1` set before starting Steam or
+  the game. Restart existing processes after changing it. This orders CPU command
+  encoding and submission; it does not wait for GPU completion.
+- A native x86_64 runtime exposing `XR_KHR_metal_enable`.
 
-Install build tools:
+Vulkan applications can use `XR_KHR_vulkan_enable` or `XR_KHR_vulkan_enable2`
+with Vulkan 1.0 through the installed driver's version, capped at 1.3.
+Graphics requirements must be queried for the session's API and system before
+creating a session. The application owns its Vulkan instance and device and must
+keep them alive until its OpenXR sessions and swapchains are destroyed.
 
-```bash
-brew install cmake mingw-w64
-```
+## Build
 
-## Building
+Headgasket's `just init-dev` initializes the pinned dependencies. `just build-wineopenxr`
+builds the bridge using the repository's pinned Vulkan headers and patch set.
+Build tools are CMake, MinGW and Xcode.
 
-```bash
-git submodule update --init
-cmake -B build
-cmake --build build
-```
-
-This produces `build/src/pe/wineopenxr.dll` and `build/src/unix/wineopenxr.so`.
-
-## Installing
-
-Copy the artifacts into CrossOver's Wine tree:
-
-```bash
-CX_WINE=/Applications/CrossOver.app/Contents/SharedSupport/CrossOver/lib/wine
-cp build/src/pe/wineopenxr.dll "$CX_WINE/x86_64-windows/wineopenxr.dll"
-cp build/src/unix/wineopenxr.so "$CX_WINE/x86_64-unix/wineopenxr.so"
-```
-
-Register the bridge as the active OpenXR runtime in your bottle:
-
-```bash
-BOTTLE=<BottleName>
-WINEPREFIX="$HOME/Library/Application Support/CrossOver/Bottles/$BOTTLE"
-WINE=/Applications/CrossOver.app/Contents/SharedSupport/CrossOver/bin/wine
-
-cp build/src/pe/wineopenxr.dll "$WINEPREFIX/drive_c/windows/system32/wineopenxr.dll"
-
-mkdir -p "$WINEPREFIX/drive_c/openxr"
-cp manifests/wineopenxr64.json "$WINEPREFIX/drive_c/openxr/"
-
-WINEPREFIX="$WINEPREFIX" CX_BOTTLE="$BOTTLE" "$WINE" reg add \
-  'HKLM\Software\Khronos\OpenXR\1' /v ActiveRuntime /t REG_SZ \
-  /d 'C:\openxr\wineopenxr64.json' /f
-```
-
-## Running
-
-Start your native OpenXR runtime, then launch the app through CrossOver GUI or Steam as usual. The bridge loads automatically via the bottle's registry entry.
+The two artifacts are `wineopenxr.dll`, a Wine PE builtin, and `wineopenxr.so`,
+an x86_64 host library. Headgasket's bottle installer installs and registers them.
 
 ## Diagnostics
 
-Enable Wine's `+openxr` debug channel to capture bridge logs from both `wineopenxr.dll` and `wineopenxr.so`.
+Enable Wine's `+openxr` channel. Vulkan failures retain their `VkResult` in logs;
+the OpenXR call returns the applicable `XrResult`. Unsupported Wine handle ABIs
+and asynchronous MoltenVK submission configurations fail session creation.
 
 ## License
 

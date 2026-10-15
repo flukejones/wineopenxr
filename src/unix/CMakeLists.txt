@@ -2,6 +2,8 @@ add_library(wineopenxr_unix SHARED
     openxr.c
     thunks.c
     session.m
+    vulkan.m
+    wine_vulkan.c
     metal.m
 )
 
@@ -9,6 +11,7 @@ target_include_directories(wineopenxr_unix PRIVATE
     "${CMAKE_SOURCE_DIR}/src/include"
     "${WINE_INCLUDE_DIR}"
     "${CMAKE_SOURCE_DIR}/extern/OpenXR-SDK/include"
+    "${VULKAN_HEADERS_DIR}"
 )
 
 target_compile_options(wineopenxr_unix PRIVATE
@@ -16,6 +19,7 @@ target_compile_options(wineopenxr_unix PRIVATE
     -DWINE_NO_LONG_TYPES
     -D__WINESRC__
     -DWINE_UNIX_LIB
+    -DXR_USE_GRAPHICS_API_VULKAN
 )
 
 # __wine_dbg_header, __wine_dbg_output, and NtQueryPerformanceCounter resolve

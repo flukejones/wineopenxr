@@ -4,6 +4,8 @@
 #define __WINE_OPENXR_BRIDGE_H
 
 #include <stdint.h>
+#define VK_NO_PROTOTYPES
+#include <vulkan/vulkan.h>
 #include "openxr/openxr.h"
 
 typedef struct IMTLD3D11InteropDevice IMTLD3D11InteropDevice;
@@ -90,6 +92,43 @@ struct export_metal_textures_params
     XrResult result;
 };
 
+struct vulkan_requirements_params
+{
+    XrInstance instance;
+    XrSystemId system_id;
+    XrGraphicsRequirementsVulkanKHR *requirements;
+    XrResult result;
+};
+
+struct vulkan_physical_device_params
+{
+    XrInstance instance;
+    XrSystemId system_id;
+    VkPhysicalDevice physical_device;
+    const char *wine_version;
+    const char *wine_build;
+    int matches;
+    XrResult result;
+};
+
+struct create_vulkan_session_params
+{
+    XrInstance instance;
+    XrSystemId system_id;
+    const XrGraphicsBindingVulkanKHR *binding;
+    struct wine_XrSession *session;
+    const char *wine_version;
+    const char *wine_build;
+    XrResult result;
+};
+
+struct import_vulkan_texture_params
+{
+    VkImage image;
+    uint64_t metal_texture;
+    VkResult result;
+};
+
 struct wine_XrInstance
 {
     /* Keep host_instance first. wine_xrCreateInstance passes &host_instance to
@@ -109,6 +148,9 @@ struct wine_XrInstance
      * flips Monado's gotten_requirements, so the bridge must track it before
      * that call. Read and written under primary_session_lock */
     XrSystemId d3d11_requirements_queried_for;
+    XrSystemId vulkan_requirements_queried_for;
+    VkInstance vulkan_instance;
+    VkPhysicalDevice vulkan_physical_device;
 
     XrVersion api_version;
     uint64_t enabled_extensions[(XR_BRIDGE_EXTENSION_COUNT + 63) / 64];
@@ -118,6 +160,8 @@ struct wine_XrSession
 {
     XrSession host_session;
     struct wine_XrInstance *instance;
+    enum { WINE_XR_D3D11, WINE_XR_VULKAN } graphics_api;
+    struct wine_vulkan_session *vulkan;
 
     void *mtl_device;          /* id<MTLDevice>, owned +1 reference */
     void *mtl_command_queue;   /* id<MTLCommandQueue>, owned +1 reference */
@@ -140,6 +184,19 @@ struct wine_XrSession
 #endif
 };
 
+#ifdef _WIN32
+struct wine_XrSwapchain;
+XrResult wine_vulkan_api_version(XrVersion *version);
+XrResult wine_create_vulkan_session(struct wine_XrInstance *instance,
+                                    const XrGraphicsBindingVulkanKHR *binding,
+                                    XrSystemId system_id, struct wine_XrSession *session);
+XrResult wine_enumerate_vulkan_images(struct wine_XrSwapchain *swapchain,
+                                       uint32_t capacity, uint32_t *count,
+                                       XrSwapchainImageBaseHeader *images);
+void wine_destroy_vulkan_images(struct wine_XrSwapchain *swapchain);
+void wine_destroy_vulkan_session(struct wine_XrSession *session);
+#endif
+
 struct wine_XrSwapchain
 {
     XrSwapchain host_swapchain;
@@ -154,6 +211,8 @@ struct wine_XrSwapchain
         uint32_t height;
         uint32_t arraySize;
         uint32_t mipCount;
+        uint32_t sampleCount;
+        uint32_t faceCount;
         int64_t format;
         XrSwapchainUsageFlags usageFlags;
     } create_info;

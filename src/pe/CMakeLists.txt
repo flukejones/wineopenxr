@@ -3,6 +3,7 @@ project(wineopenxr_pe C)
 
 add_library(wineopenxr SHARED
     openxr.c
+    vulkan.c
     thunks.c
     "${WINEOPENXR_DEF}"
 )
@@ -14,6 +15,7 @@ target_include_directories(wineopenxr PRIVATE
     "${PROJECT_INCLUDE_DIR}"
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${OPENXR_SDK_INCLUDE_DIR}"
+    "${VULKAN_HEADERS_DIR}"
 )
 
 # UCRT avoids a msvcrt/ucrt FILE* struct mismatch across the PE boundary

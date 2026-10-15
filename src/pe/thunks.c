@@ -5,6 +5,7 @@
 #include <windows.h>
 
 #define XR_USE_GRAPHICS_API_D3D11
+#define XR_USE_GRAPHICS_API_VULKAN
 #define XR_USE_PLATFORM_WIN32
 
 #include "bridge.h"
@@ -699,7 +700,15 @@ static XrResult WINAPI wine_xrWaitSwapchainImage(XrSwapchain swapchain, const Xr
 
 XrResult WINAPI xrConvertTimeToWin32PerformanceCounterKHR(XrInstance instance, XrTime time, LARGE_INTEGER * performanceCounter);
 XrResult WINAPI xrConvertWin32PerformanceCounterToTimeKHR(XrInstance instance, const LARGE_INTEGER * performanceCounter, XrTime * time);
+XrResult WINAPI xrCreateVulkanDeviceKHR(XrInstance instance, const XrVulkanDeviceCreateInfoKHR * createInfo, VkDevice * vulkanDevice, VkResult * vulkanResult);
+XrResult WINAPI xrCreateVulkanInstanceKHR(XrInstance instance, const XrVulkanInstanceCreateInfoKHR * createInfo, VkInstance * vulkanInstance, VkResult * vulkanResult);
 XrResult WINAPI xrGetD3D11GraphicsRequirementsKHR(XrInstance instance, XrSystemId systemId, XrGraphicsRequirementsD3D11KHR * graphicsRequirements);
+XrResult WINAPI xrGetVulkanDeviceExtensionsKHR(XrInstance instance, XrSystemId systemId, uint32_t bufferCapacityInput, uint32_t * bufferCountOutput, char * buffer);
+XrResult WINAPI xrGetVulkanGraphicsDevice2KHR(XrInstance instance, const XrVulkanGraphicsDeviceGetInfoKHR * getInfo, VkPhysicalDevice * vulkanPhysicalDevice);
+XrResult WINAPI xrGetVulkanGraphicsDeviceKHR(XrInstance instance, XrSystemId systemId, VkInstance vkInstance, VkPhysicalDevice * vkPhysicalDevice);
+XrResult WINAPI xrGetVulkanGraphicsRequirements2KHR(XrInstance instance, XrSystemId systemId, XrGraphicsRequirementsVulkanKHR * graphicsRequirements);
+XrResult WINAPI xrGetVulkanGraphicsRequirementsKHR(XrInstance instance, XrSystemId systemId, XrGraphicsRequirementsVulkanKHR * graphicsRequirements);
+XrResult WINAPI xrGetVulkanInstanceExtensionsKHR(XrInstance instance, XrSystemId systemId, uint32_t bufferCapacityInput, uint32_t * bufferCountOutput, char * buffer);
 
 static const struct openxr_function xr_function_table[] =
 {
@@ -708,8 +717,8 @@ static const struct openxr_function xr_function_table[] =
     {"xrAttachSessionActionSets", (void *)wine_xrAttachSessionActionSets, -1, 0, 0},
     {"xrBeginFrame", (void *)wine_xrBeginFrame, -1, 0, 0},
     {"xrBeginSession", (void *)wine_xrBeginSession, -1, 0, 0},
-    {"xrConvertTimeToWin32PerformanceCounterKHR", (void *)xrConvertTimeToWin32PerformanceCounterKHR, 11, 0, 0},
-    {"xrConvertWin32PerformanceCounterToTimeKHR", (void *)xrConvertWin32PerformanceCounterToTimeKHR, 11, 0, 0},
+    {"xrConvertTimeToWin32PerformanceCounterKHR", (void *)xrConvertTimeToWin32PerformanceCounterKHR, 13, 0, 0},
+    {"xrConvertWin32PerformanceCounterToTimeKHR", (void *)xrConvertWin32PerformanceCounterToTimeKHR, 13, 0, 0},
     {"xrCreateAction", (void *)wine_xrCreateAction, -1, 0, 0},
     {"xrCreateActionSet", (void *)wine_xrCreateActionSet, -1, 0, 0},
     {"xrCreateActionSpace", (void *)wine_xrCreateActionSpace, -1, 0, 0},
@@ -718,6 +727,8 @@ static const struct openxr_function xr_function_table[] =
     {"xrCreateReferenceSpace", (void *)wine_xrCreateReferenceSpace, -1, 0, 0},
     {"xrCreateSession", (void *)xrCreateSession, -1, 0, 0},
     {"xrCreateSwapchain", (void *)xrCreateSwapchain, -1, 0, 0},
+    {"xrCreateVulkanDeviceKHR", (void *)xrCreateVulkanDeviceKHR, 12, 0, 0},
+    {"xrCreateVulkanInstanceKHR", (void *)xrCreateVulkanInstanceKHR, 12, 0, 0},
     {"xrDestroyAction", (void *)wine_xrDestroyAction, -1, 0, 0},
     {"xrDestroyActionSet", (void *)wine_xrDestroyActionSet, -1, 0, 0},
     {"xrDestroyHandTrackerEXT", (void *)wine_xrDestroyHandTrackerEXT, 0, 0, 0},
@@ -732,7 +743,7 @@ static const struct openxr_function xr_function_table[] =
     {"xrEnumerateDisplayRefreshRatesFB", (void *)wine_xrEnumerateDisplayRefreshRatesFB, 1, 0, 0},
     {"xrEnumerateEnvironmentBlendModes", (void *)wine_xrEnumerateEnvironmentBlendModes, -1, 0, 0},
     {"xrEnumerateInstanceExtensionProperties", (void *)wine_xrEnumerateInstanceExtensionProperties, -1, 0, 1},
-    {"xrEnumeratePerformanceMetricsCounterPathsMETA", (void *)wine_xrEnumeratePerformanceMetricsCounterPathsMETA, 12, 0, 0},
+    {"xrEnumeratePerformanceMetricsCounterPathsMETA", (void *)wine_xrEnumeratePerformanceMetricsCounterPathsMETA, 14, 0, 0},
     {"xrEnumerateReferenceSpaces", (void *)wine_xrEnumerateReferenceSpaces, -1, 0, 0},
     {"xrEnumerateSwapchainFormats", (void *)wine_xrEnumerateSwapchainFormats, -1, 0, 0},
     {"xrEnumerateSwapchainImages", (void *)xrEnumerateSwapchainImages, -1, 0, 0},
@@ -748,12 +759,18 @@ static const struct openxr_function xr_function_table[] =
     {"xrGetInputSourceLocalizedName", (void *)wine_xrGetInputSourceLocalizedName, -1, 0, 0},
     {"xrGetInstanceProcAddr", (void *)xrGetInstanceProcAddr, -1, 0, 0},
     {"xrGetInstanceProperties", (void *)wine_xrGetInstanceProperties, -1, 0, 0},
-    {"xrGetPerformanceMetricsStateMETA", (void *)wine_xrGetPerformanceMetricsStateMETA, 12, 0, 0},
+    {"xrGetPerformanceMetricsStateMETA", (void *)wine_xrGetPerformanceMetricsStateMETA, 14, 0, 0},
     {"xrGetReferenceSpaceBoundsRect", (void *)wine_xrGetReferenceSpaceBoundsRect, -1, 0, 0},
     {"xrGetSystem", (void *)wine_xrGetSystem, -1, 0, 0},
     {"xrGetSystemProperties", (void *)wine_xrGetSystemProperties, -1, 0, 0},
     {"xrGetViewConfigurationProperties", (void *)wine_xrGetViewConfigurationProperties, -1, 0, 0},
     {"xrGetVisibilityMaskKHR", (void *)wine_xrGetVisibilityMaskKHR, 10, 0, 0},
+    {"xrGetVulkanDeviceExtensionsKHR", (void *)xrGetVulkanDeviceExtensionsKHR, 11, 0, 0},
+    {"xrGetVulkanGraphicsDevice2KHR", (void *)xrGetVulkanGraphicsDevice2KHR, 12, 0, 0},
+    {"xrGetVulkanGraphicsDeviceKHR", (void *)xrGetVulkanGraphicsDeviceKHR, 11, 0, 0},
+    {"xrGetVulkanGraphicsRequirements2KHR", (void *)xrGetVulkanGraphicsRequirements2KHR, 12, 0, 0},
+    {"xrGetVulkanGraphicsRequirementsKHR", (void *)xrGetVulkanGraphicsRequirementsKHR, 11, 0, 0},
+    {"xrGetVulkanInstanceExtensionsKHR", (void *)xrGetVulkanInstanceExtensionsKHR, 11, 0, 0},
     {"xrLocateHandJointsEXT", (void *)wine_xrLocateHandJointsEXT, 0, 0, 0},
     {"xrLocateSpace", (void *)wine_xrLocateSpace, -1, 0, 0},
     {"xrLocateSpaces", (void *)wine_xrLocateSpaces, -1, 1, 0},
@@ -761,12 +778,12 @@ static const struct openxr_function xr_function_table[] =
     {"xrLocateViews", (void *)wine_xrLocateViews, -1, 0, 0},
     {"xrPathToString", (void *)wine_xrPathToString, -1, 0, 0},
     {"xrPollEvent", (void *)xrPollEvent, -1, 0, 0},
-    {"xrQueryPerformanceMetricsCounterMETA", (void *)wine_xrQueryPerformanceMetricsCounterMETA, 12, 0, 0},
+    {"xrQueryPerformanceMetricsCounterMETA", (void *)wine_xrQueryPerformanceMetricsCounterMETA, 14, 0, 0},
     {"xrReleaseSwapchainImage", (void *)xrReleaseSwapchainImage, -1, 0, 0},
     {"xrRequestDisplayRefreshRateFB", (void *)wine_xrRequestDisplayRefreshRateFB, 1, 0, 0},
     {"xrRequestExitSession", (void *)wine_xrRequestExitSession, -1, 0, 0},
     {"xrResultToString", (void *)wine_xrResultToString, -1, 0, 0},
-    {"xrSetPerformanceMetricsStateMETA", (void *)wine_xrSetPerformanceMetricsStateMETA, 12, 0, 0},
+    {"xrSetPerformanceMetricsStateMETA", (void *)wine_xrSetPerformanceMetricsStateMETA, 14, 0, 0},
     {"xrStopHapticFeedback", (void *)wine_xrStopHapticFeedback, -1, 0, 0},
     {"xrStringToPath", (void *)wine_xrStringToPath, -1, 0, 0},
     {"xrStructureTypeToString", (void *)wine_xrStructureTypeToString, -1, 0, 0},

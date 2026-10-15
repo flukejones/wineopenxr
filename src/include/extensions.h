@@ -15,6 +15,8 @@ static const char *const xr_bridge_extensions[] =
     "XR_KHR_extended_struct_name_lengths",
     "XR_KHR_locate_spaces",
     "XR_KHR_visibility_mask",
+    "XR_KHR_vulkan_enable",
+    "XR_KHR_vulkan_enable2",
     "XR_KHR_win32_convert_performance_counter_time",
     "XR_META_performance_metrics",
 };

@@ -15,6 +15,10 @@ enum unix_call
     unix_create_d3d11_session,
     unix_release_metal_session,
     unix_export_metal_textures,
+    unix_vulkan_requirements,
+    unix_vulkan_physical_device,
+    unix_create_vulkan_session,
+    unix_import_vulkan_texture,
     unix_xrAcquireSwapchainImage,
     unix_xrApplyHapticFeedback,
     unix_xrAttachSessionActionSets,
@@ -88,7 +92,7 @@ enum unix_call
     unix_count,
 };
 
-#define XR_BRIDGE_EXTENSION_COUNT 13
+#define XR_BRIDGE_EXTENSION_COUNT 15
 
 struct xrAcquireSwapchainImage_params
 {

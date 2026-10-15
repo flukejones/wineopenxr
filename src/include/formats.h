@@ -10,17 +10,18 @@
 struct format_pair {
     int64_t mtl_format;
     int64_t dxgi_format;
+    int64_t vk_format;
     int is_depth;
 };
 
 static const struct format_pair format_translation_table[] = {
-    { 80,  87, 0 },  /* MTLPixelFormatBGRA8Unorm            <-> DXGI_FORMAT_B8G8R8A8_UNORM       */
-    { 81,  91, 0 },  /* MTLPixelFormatBGRA8Unorm_sRGB       <-> DXGI_FORMAT_B8G8R8A8_UNORM_SRGB  */
-    { 70,  28, 0 },  /* MTLPixelFormatRGBA8Unorm            <-> DXGI_FORMAT_R8G8B8A8_UNORM       */
-    { 71,  29, 0 },  /* MTLPixelFormatRGBA8Unorm_sRGB       <-> DXGI_FORMAT_R8G8B8A8_UNORM_SRGB  */
-    { 115, 10, 0 },  /* MTLPixelFormatRGBA16Float           <-> DXGI_FORMAT_R16G16B16A16_FLOAT   */
-    { 252, 40, 1 },  /* MTLPixelFormatDepth32Float          <-> DXGI_FORMAT_D32_FLOAT            */
-    { 260, 20, 1 },  /* MTLPixelFormatDepth32Float_Stencil8 <-> DXGI_FORMAT_D32_FLOAT_S8X24_UINT */
+    { 80,  87, 44, 0 },  /* BGRA8Unorm */
+    { 81,  91, 50, 0 },  /* BGRA8Unorm_sRGB */
+    { 70,  28, 37, 0 },  /* RGBA8Unorm */
+    { 71,  29, 43, 0 },  /* RGBA8Unorm_sRGB */
+    { 115, 10, 97, 0 },  /* RGBA16Float */
+    { 252, 40, 126, 1 }, /* Depth32Float */
+    { 260, 20, 130, 1 }, /* Depth32Float_Stencil8 */
 };
 
 #define FORMAT_TABLE_SIZE (sizeof(format_translation_table) / sizeof(format_translation_table[0]))
@@ -48,6 +49,24 @@ static inline int64_t dxgi_format_to_mtl(int64_t dxgi)
     unsigned int i;
     for (i = 0; i < FORMAT_TABLE_SIZE; i++)
         if (format_translation_table[i].dxgi_format == dxgi)
+            return format_translation_table[i].mtl_format;
+    return 0;
+}
+
+static inline int64_t mtl_format_to_vk(int64_t mtl)
+{
+    unsigned int i;
+    for (i = 0; i < FORMAT_TABLE_SIZE; i++)
+        if (format_translation_table[i].mtl_format == mtl)
+            return format_translation_table[i].vk_format;
+    return 0;
+}
+
+static inline int64_t vk_format_to_mtl(int64_t vk)
+{
+    unsigned int i;
+    for (i = 0; i < FORMAT_TABLE_SIZE; i++)
+        if (format_translation_table[i].vk_format == vk)
             return format_translation_table[i].mtl_format;
     return 0;
 }

@@ -25,6 +25,10 @@ extern NTSTATUS wine_init(void *args);
 extern NTSTATUS wine_create_d3d11_session(void *args);
 extern NTSTATUS wine_release_metal_session(void *args);
 extern NTSTATUS wine_export_metal_textures(void *args);
+extern NTSTATUS wine_vulkan_requirements(void *args);
+extern NTSTATUS wine_vulkan_physical_device(void *args);
+extern NTSTATUS wine_create_vulkan_session(void *args);
+extern NTSTATUS wine_import_vulkan_texture(void *args);
 extern NTSTATUS wine_xrConvertTimeToWin32PerformanceCounterKHR(void *args);
 extern NTSTATUS wine_xrConvertWin32PerformanceCounterToTimeKHR(void *args);
 extern NTSTATUS wine_xrCreateInstance(void *args);
@@ -826,6 +830,10 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
     wine_create_d3d11_session,
     wine_release_metal_session,
     wine_export_metal_textures,
+    wine_vulkan_requirements,
+    wine_vulkan_physical_device,
+    wine_create_vulkan_session,
+    wine_import_vulkan_texture,
     thunk_xrAcquireSwapchainImage,
     thunk_xrApplyHapticFeedback,
     thunk_xrAttachSessionActionSets,
