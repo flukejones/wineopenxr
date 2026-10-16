@@ -19,6 +19,7 @@ enum unix_call
     unix_vulkan_physical_device,
     unix_create_vulkan_session,
     unix_import_vulkan_texture,
+    unix_d3dmetal,
     unix_xrAcquireSwapchainImage,
     unix_xrApplyHapticFeedback,
     unix_xrAttachSessionActionSets,

@@ -173,7 +173,7 @@ struct wine_XrSession
 
     ID3D11Fence *gpu_fence;                 /* keeps the MTLSharedEvent behind mtl_shared_event alive */
     int64_t gpu_fence_value;                /* monotonic, guarded by swapchain_lock */
-    uint64_t mtl_shared_event;              /* borrowed id<MTLSharedEvent>, valid while gpu_fence lives */
+    uint64_t mtl_shared_event;              /* borrowed from DXMT fence; separately retained for D3DMetal */
 
     struct list swapchain_list;
 

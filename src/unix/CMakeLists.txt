@@ -5,6 +5,7 @@ add_library(wineopenxr_unix SHARED
     vulkan.m
     wine_vulkan.c
     metal.m
+    d3dmetal.m
 )
 
 target_include_directories(wineopenxr_unix PRIVATE

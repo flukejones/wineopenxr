@@ -12,13 +12,14 @@
 #include <windows.h>
 #include <initguid.h>
 #include <d3d11.h>
-#include <dxgi.h>
+#include <dxgi1_2.h>
 
 #include <wine/debug.h>
 
 #include "bridge.h"
 #include "openxr/openxr_loader_negotiation.h"
 #include "dxmt.h"
+#include "d3dmetal.h"
 #include "formats.h"
 #include "events.h"
 
@@ -317,7 +318,7 @@ static void release_imported_d3d11_textures(XrSwapchainImageD3D11KHR *images,
         ID3D11Texture2D_Release(images[i].texture);
 }
 
-static void release_dxmt_refs(struct wine_XrSession *sess)
+static void release_d3d11_refs(struct wine_XrSession *sess)
 {
     if (sess->d3d11_context4)
     {
@@ -368,7 +369,14 @@ static void session_teardown(struct wine_XrSession *session)
     if (session->gpu_fence)
         ID3D11Fence_Release(session->gpu_fence);
 
-    release_dxmt_refs(session);
+    if (!session->dxmt_device && session->mtl_shared_event)
+    {
+        struct d3dmetal_params event = {
+            .op = D3DMETAL_RELEASE_EVENT, .event = session->mtl_shared_event,
+        };
+        UNIX_CALL(d3dmetal, &event);
+    }
+    release_d3d11_refs(session);
     wine_destroy_vulkan_session(session);
 
     if (session->mtl_command_queue || session->mtl_device)
@@ -401,10 +409,9 @@ static XrResult create_session_d3d11(struct wine_XrInstance *wine_instance,
 
     hr = ID3D11Device_QueryInterface(binding->device,
         &IID_IMTLD3D11InteropDevice, (void **)&wine_session->dxmt_device);
-    if (FAILED(hr))
+    if (FAILED(hr) && hr != E_NOINTERFACE)
     {
-        WINE_ERR("D3D11 device does not support IMTLD3D11InteropDevice "
-                 "(not DXMT?)\n");
+        WINE_ERR("D3D11 interop QueryInterface failed: 0x%08x\n", (unsigned)hr);
         return XR_ERROR_GRAPHICS_DEVICE_INVALID;
     }
 
@@ -413,13 +420,14 @@ static XrResult create_session_d3d11(struct wine_XrInstance *wine_instance,
     ID3D11Device_GetImmediateContext(wine_session->d3d11_device,
                                      &wine_session->d3d11_context);
 
-    /* Cache ID3D11DeviceContext4 so the per-release Signal call does
-     * not hit the DXMT QueryInterface vtable hop. DXMT always
-     * implements ID3D11DeviceContext4 */
     hr = ID3D11DeviceContext_QueryInterface(wine_session->d3d11_context,
         &IID_ID3D11DeviceContext4, (void **)&wine_session->d3d11_context4);
     if (FAILED(hr))
+    {
         wine_session->d3d11_context4 = NULL;
+        WINE_ERR("GPU fence signaling requires ID3D11DeviceContext4: 0x%08x\n", (unsigned)hr);
+        return XR_ERROR_GRAPHICS_DEVICE_INVALID;
+    }
 
     params.instance = (XrInstance)wine_instance;
     params.system_id = system_id;
@@ -429,59 +437,75 @@ static XrResult create_session_d3d11(struct wine_XrInstance *wine_instance,
     if (status)
     {
         WINE_ERR("create_d3d11_session unix call failed: 0x%x\n", (unsigned)status);
-        release_dxmt_refs(wine_session);
+        release_d3d11_refs(wine_session);
         return XR_ERROR_RUNTIME_FAILURE;
     }
 
     if (params.result != XR_SUCCESS)
     {
-        release_dxmt_refs(wine_session);
+        release_d3d11_refs(wine_session);
         return params.result;
     }
 
     wine_session->mtl_device = params.mtl_device;
     wine_session->mtl_command_queue = params.mtl_command_queue;
 
-    /* Plumb the MTLSharedEvent through an ID3D11Fence so per-release
-     * Signal calls land in a native Metal event the binding queue
-     * GPU-waits on before the host reads the swapchain */
     {
         ID3D11Device5 *device5 = NULL;
+        ID3D11Fence *fence = NULL;
+        struct d3dmetal_params capture = {
+            .op = D3DMETAL_BEGIN_FENCE,
+            .device = (uint64_t)(uintptr_t)wine_session->mtl_device,
+        };
         hr = ID3D11Device_QueryInterface(wine_session->d3d11_device,
             &IID_ID3D11Device5, (void **)&device5);
-        if (SUCCEEDED(hr))
+        if (FAILED(hr))
         {
-            ID3D11Fence *fence = NULL;
-            hr = ID3D11Device5_CreateFence(device5, 0, D3D11_FENCE_FLAG_NONE,
-                                           &IID_ID3D11Fence, (void **)&fence);
-            if (SUCCEEDED(hr))
-            {
-                UINT64 mtl_event = 0;
-                hr = wine_session->dxmt_device->lpVtbl->GetFenceSharedEvent(
-                    wine_session->dxmt_device, fence, &mtl_event);
-                if (SUCCEEDED(hr) && mtl_event)
-                {
-                    wine_session->gpu_fence = fence;
-                    wine_session->gpu_fence_value = 0;
-                    wine_session->mtl_shared_event = mtl_event;
-                }
-                else
-                {
-                    WINE_TRACE("GetFenceSharedEvent failed: 0x%08x\n",
-                               (unsigned)hr);
-                    ID3D11Fence_Release(fence);
-                }
-            }
-            else
-            {
-                WINE_TRACE("CreateFence failed: 0x%08x\n", (unsigned)hr);
-            }
-            ID3D11Device5_Release(device5);
+            WINE_ERR("QueryInterface ID3D11Device5 failed: 0x%08x\n", (unsigned)hr);
+            return XR_ERROR_GRAPHICS_DEVICE_INVALID;
         }
-        else
+        if (!wine_session->dxmt_device)
         {
-            WINE_TRACE("QueryInterface ID3D11Device5 failed: 0x%08x\n",
-                       (unsigned)hr);
+            status = UNIX_CALL(d3dmetal, &capture);
+            if (status || capture.result)
+            {
+                WINE_ERR("D3DMetal fence capture begin failed: status=0x%x result=%d\n",
+                         (unsigned)status, capture.result);
+                ID3D11Device5_Release(device5);
+                return XR_ERROR_GRAPHICS_DEVICE_INVALID;
+            }
+        }
+        hr = ID3D11Device5_CreateFence(device5, 0, D3D11_FENCE_FLAG_NONE,
+                                     &IID_ID3D11Fence, (void **)&fence);
+        ID3D11Device5_Release(device5);
+        if (!wine_session->dxmt_device)
+        {
+            capture.op = D3DMETAL_END;
+            status = UNIX_CALL(d3dmetal, &capture);
+            wine_session->mtl_shared_event = capture.event;
+            if (status || capture.result || !capture.event)
+            {
+                WINE_ERR("D3DMetal fence capture failed: status=0x%x result=%d seen=%u hr=0x%08x\n",
+                         (unsigned)status, capture.result, capture.seen, (unsigned)hr);
+                if (fence) ID3D11Fence_Release(fence);
+                return XR_ERROR_GRAPHICS_DEVICE_INVALID;
+            }
+        }
+        if (FAILED(hr))
+        {
+            WINE_ERR("CreateFence failed: 0x%08x\n", (unsigned)hr);
+            return XR_ERROR_RUNTIME_FAILURE;
+        }
+        wine_session->gpu_fence = fence;
+        if (wine_session->dxmt_device)
+        {
+            hr = wine_session->dxmt_device->lpVtbl->GetFenceSharedEvent(
+                wine_session->dxmt_device, fence, &wine_session->mtl_shared_event);
+            if (FAILED(hr) || !wine_session->mtl_shared_event)
+            {
+                WINE_ERR("GetFenceSharedEvent failed: 0x%08x\n", (unsigned)hr);
+                return XR_ERROR_GRAPHICS_DEVICE_INVALID;
+            }
         }
     }
 
@@ -606,6 +630,14 @@ XrResult WINAPI xrCreateSession(XrInstance instance,
     if (result != XR_SUCCESS)
     {
         WINE_WARN("xrCreateSession failed: %d\n", result);
+        if (wine_session->host_session)
+        {
+            struct xrDestroySession_params destroy = {.session = (XrSession)wine_session};
+            NTSTATUS cleanup = UNIX_CALL(xrDestroySession, &destroy);
+            if (cleanup || destroy.result != XR_SUCCESS)
+                WINE_ERR("session admission cleanup failed: status=0x%x result=%d\n",
+                         (unsigned)cleanup, destroy.result);
+        }
         session_teardown(wine_session);
         return result;
     }
@@ -883,8 +915,39 @@ XrResult WINAPI xrEnumerateSwapchainImages(XrSwapchain swapchain,
                         : (D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
                 }
 
-                hr = wine_session->dxmt_device->lpVtbl->ImportMTLTexture2D(
-                    wine_session->dxmt_device, &desc, mtl_textures[i], &texture);
+                if (wine_session->dxmt_device)
+                    hr = wine_session->dxmt_device->lpVtbl->ImportMTLTexture2D(
+                        wine_session->dxmt_device, &desc, mtl_textures[i], &texture);
+                else
+                {
+                    struct d3dmetal_params capture = {
+                        .op = D3DMETAL_BEGIN_TEXTURE, .texture = mtl_textures[i],
+                    };
+                    status = UNIX_CALL(d3dmetal, &capture);
+                    if (status || capture.result)
+                    {
+                        WINE_ERR("D3DMetal texture capture begin failed: status=0x%x result=%d\n",
+                                 (unsigned)status, capture.result);
+                        hr = E_FAIL;
+                    }
+                    else
+                    {
+                        D3D11_TEXTURE2D_DESC d3d_desc;
+                        memcpy(&d3d_desc, &desc, sizeof(d3d_desc));
+                        hr = ID3D11Device_CreateTexture2D(wine_session->d3d11_device,
+                                                        &d3d_desc, NULL, &texture);
+                        capture.op = D3DMETAL_END;
+                        status = UNIX_CALL(d3dmetal, &capture);
+                        if (status || capture.result)
+                        {
+                            WINE_ERR("D3DMetal texture capture failed: status=0x%x result=%d seen=%u hr=0x%08x\n",
+                                     (unsigned)status, capture.result, capture.seen, (unsigned)hr);
+                            if (texture) ID3D11Texture2D_Release(texture);
+                            texture = NULL;
+                            hr = E_FAIL;
+                        }
+                    }
+                }
                 if (FAILED(hr))
                 {
                     WINE_ERR("ImportMTLTexture2D failed for image %u: 0x%08x\n",
@@ -953,16 +1016,28 @@ XrResult WINAPI xrReleaseSwapchainImage(XrSwapchain swapchain,
         HRESULT hr;
 
         EnterCriticalSection(&wine_session->swapchain_lock);
-        value = ++wine_session->gpu_fence_value;
+        if (wine_session->gpu_fence_value == INT64_MAX)
+        {
+            LeaveCriticalSection(&wine_session->swapchain_lock);
+            return XR_ERROR_LIMIT_REACHED;
+        }
+        value = wine_session->gpu_fence_value + 1;
         hr = wine_session->d3d11_context4->lpVtbl->Signal(
             wine_session->d3d11_context4,
             (ID3D11Fence *)wine_session->gpu_fence, value);
+        if (SUCCEEDED(hr))
+        {
+            wine_session->gpu_fence_value = value;
+            if (!wine_session->dxmt_device)
+                ID3D11DeviceContext_Flush(wine_session->d3d11_context);
+        }
         LeaveCriticalSection(&wine_session->swapchain_lock);
 
         if (SUCCEEDED(hr)) {
             params.gpu_fence_value = (uint64_t)value;
         } else {
-            WINE_WARN("GPU fence signal failed: 0x%08x\n", (unsigned)hr);
+            WINE_ERR("GPU fence signal failed: 0x%08x\n", (unsigned)hr);
+            return XR_ERROR_RUNTIME_FAILURE;
         }
     }
 
@@ -1226,6 +1301,74 @@ XrResult WINAPI xrPollEvent(XrInstance instance, XrEventDataBuffer *eventData)
     return XR_EVENT_UNAVAILABLE;
 }
 
+static XrResult match_dxgi_adapter(LUID *luid)
+{
+    HMODULE module = LoadLibraryA("dxgi.dll");
+    HRESULT (WINAPI *create_factory)(REFIID, void **);
+    IDXGIFactory1 *factory = NULL;
+    DXGI_ADAPTER_DESC1 selected = {0};
+    UINT count;
+    BOOL matched = FALSE;
+    HRESULT hr;
+    XrResult result = XR_ERROR_GRAPHICS_DEVICE_INVALID;
+
+    if (!module)
+    {
+        WINE_ERR("LoadLibrary dxgi.dll failed: %lu\n", GetLastError());
+        return result;
+    }
+    create_factory = (void *)GetProcAddress(module, "CreateDXGIFactory1");
+    if (!create_factory)
+    {
+        WINE_ERR("CreateDXGIFactory1 lookup failed: %lu\n", GetLastError());
+        goto out;
+    }
+    hr = create_factory(&IID_IDXGIFactory1, (void **)&factory);
+    if (FAILED(hr))
+    {
+        WINE_ERR("CreateDXGIFactory1 failed: 0x%08x\n", (unsigned)hr);
+        goto out;
+    }
+    for (count = 0; count < 64; count++)
+    {
+        IDXGIAdapter1 *adapter = NULL;
+        DXGI_ADAPTER_DESC1 desc;
+        hr = IDXGIFactory1_EnumAdapters1(factory, count, &adapter);
+        if (hr == DXGI_ERROR_NOT_FOUND) break;
+        if (FAILED(hr))
+        {
+            WINE_ERR("EnumAdapters1(%u) failed: 0x%08x\n", count, (unsigned)hr);
+            goto out;
+        }
+        hr = IDXGIAdapter1_GetDesc1(adapter, &desc);
+        IDXGIAdapter1_Release(adapter);
+        if (FAILED(hr))
+        {
+            WINE_ERR("GetDesc1(%u) failed: 0x%08x\n", count, (unsigned)hr);
+            goto out;
+        }
+        if (!count) selected = desc;
+        if (!memcmp(&desc.AdapterLuid, luid, sizeof(*luid)))
+        {
+            selected = desc;
+            matched = TRUE;
+            break;
+        }
+    }
+    /* An unmatched sole adapter must pass native Metal device validation at admission. */
+    if (!matched && count != 1)
+    {
+        WINE_ERR("No unambiguous DXGI adapter for runtime: count=%u\n", count);
+        goto out;
+    }
+    *luid = selected.AdapterLuid;
+    result = XR_SUCCESS;
+out:
+    if (factory) IDXGIFactory1_Release(factory);
+    FreeLibrary(module);
+    return result;
+}
+
 XrResult WINAPI xrGetD3D11GraphicsRequirementsKHR(XrInstance instance,
                                                   XrSystemId systemId,
                                                   XrGraphicsRequirementsD3D11KHR *graphicsRequirements)
@@ -1250,6 +1393,9 @@ XrResult WINAPI xrGetD3D11GraphicsRequirementsKHR(XrInstance instance,
     }
     if (params.result == XR_SUCCESS)
     {
+        params.result = match_dxgi_adapter(&graphicsRequirements->adapterLuid);
+        if (params.result != XR_SUCCESS)
+            return params.result;
         EnterCriticalSection(&primary_session_lock);
         wine_instance->d3d11_requirements_queried_for = systemId;
         LeaveCriticalSection(&primary_session_lock);

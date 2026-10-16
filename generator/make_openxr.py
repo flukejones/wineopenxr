@@ -125,6 +125,7 @@ CUSTOM_UNIX_CALLS = (
     "vulkan_physical_device",
     "create_vulkan_session",
     "import_vulkan_texture",
+    "d3dmetal",
 )
 
 UNSUPPORTED_TYPES = frozenset({"wchar_t"})

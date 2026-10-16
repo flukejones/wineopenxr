@@ -538,7 +538,7 @@ NTSTATUS wine_xrConvertWin32PerformanceCounterToTimeKHR(void *args)
     return STATUS_SUCCESS;
 }
 
-extern void encode_gpu_wait(void *mtl_command_queue,
+extern int encode_gpu_wait(void *mtl_command_queue,
                             uint64_t mtl_shared_event,
                             uint64_t fence_value);
 
@@ -555,9 +555,13 @@ NTSTATUS wine_xrReleaseSwapchainImage(void *args)
     }
 
     if (params->gpu_fence_value && wine_session->mtl_shared_event) {
-        encode_gpu_wait(wine_session->mtl_command_queue,
-                        wine_session->mtl_shared_event,
-                        params->gpu_fence_value);
+        if (!encode_gpu_wait(wine_session->mtl_command_queue,
+                             wine_session->mtl_shared_event,
+                             params->gpu_fence_value))
+        {
+            params->result = XR_ERROR_RUNTIME_FAILURE;
+            return STATUS_SUCCESS;
+        }
     }
 
     params->result = funcs->p_xrReleaseSwapchainImage(wine_swapchain->host_swapchain,

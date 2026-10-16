@@ -11,7 +11,7 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(openxr);
 
-void encode_gpu_wait(void *mtl_command_queue,
+int encode_gpu_wait(void *mtl_command_queue,
                      uint64_t mtl_shared_event,
                      uint64_t fence_value)
 {
@@ -21,7 +21,7 @@ void encode_gpu_wait(void *mtl_command_queue,
         id<MTLCommandBuffer> cmdbuf;
 
         if (event.signaledValue >= fence_value) {
-            return;
+            return 1;
         }
 
         cmdbuf = [queue commandBuffer];
@@ -29,7 +29,7 @@ void encode_gpu_wait(void *mtl_command_queue,
         if (!cmdbuf) {
             WINE_ERR("commandBuffer allocation failed for fence value %llu\n",
                      (unsigned long long)fence_value);
-            return;
+            return 0;
         }
 
         [cmdbuf encodeWaitForEvent:event value:fence_value];
@@ -37,5 +37,6 @@ void encode_gpu_wait(void *mtl_command_queue,
 
         WINE_TRACE("encoded wait for fence value %llu\n",
                    (unsigned long long)fence_value);
+        return 1;
     }
 }
