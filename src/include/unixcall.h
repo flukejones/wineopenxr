@@ -12,7 +12,7 @@ typedef int32_t NTSTATUS;
 enum unix_call
 {
     unix_init,
-    unix_create_d3d11_session,
+    unix_create_metal_session,
     unix_release_metal_session,
     unix_export_metal_textures,
     unix_vulkan_requirements,
@@ -60,6 +60,7 @@ enum unix_call
     unix_xrGetActionStateVector2f,
     unix_xrGetCurrentInteractionProfile,
     unix_xrGetD3D11GraphicsRequirementsKHR,
+    unix_xrGetD3D12GraphicsRequirementsKHR,
     unix_xrGetDisplayRefreshRateFB,
     unix_xrGetInputSourceLocalizedName,
     unix_xrGetInstanceProperties,
@@ -93,7 +94,7 @@ enum unix_call
     unix_count,
 };
 
-#define XR_BRIDGE_EXTENSION_COUNT 15
+#define XR_BRIDGE_EXTENSION_COUNT 16
 
 struct xrAcquireSwapchainImage_params
 {
@@ -637,6 +638,19 @@ struct xrGetD3D11GraphicsRequirementsKHR_params
 };
 
 #endif /* XR_USE_GRAPHICS_API_D3D11 */
+
+#ifdef XR_USE_GRAPHICS_API_D3D12
+#include "openxr/openxr_platform.h"
+
+struct xrGetD3D12GraphicsRequirementsKHR_params
+{
+    XrInstance instance;
+    XrSystemId systemId;
+    XrGraphicsRequirementsD3D12KHR * graphicsRequirements;
+    XrResult result;
+};
+
+#endif /* XR_USE_GRAPHICS_API_D3D12 */
 
 #ifdef XR_USE_PLATFORM_WIN32
 #include "openxr/openxr_platform.h"

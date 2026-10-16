@@ -3,6 +3,7 @@ project(wineopenxr_pe C)
 
 add_library(wineopenxr SHARED
     openxr.c
+    d3d12.c
     vulkan.c
     thunks.c
     "${WINEOPENXR_DEF}"

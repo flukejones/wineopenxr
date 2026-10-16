@@ -2,6 +2,7 @@
 
 /* Must precede any header that includes openxr_platform.h */
 #define XR_USE_GRAPHICS_API_D3D11
+#define XR_USE_GRAPHICS_API_D3D12
 #define XR_USE_GRAPHICS_API_VULKAN
 #define XR_USE_PLATFORM_WIN32
 
@@ -12,6 +13,7 @@
 #include <windows.h>
 #include <initguid.h>
 #include <d3d11.h>
+#include <d3d12.h>
 #include <dxgi1_2.h>
 
 #include <wine/debug.h>
@@ -20,6 +22,7 @@
 #include "openxr/openxr_loader_negotiation.h"
 #include "dxmt.h"
 #include "d3dmetal.h"
+#include "d3d12_bridge.h"
 #include "formats.h"
 #include "events.h"
 
@@ -310,12 +313,23 @@ static UINT d3d11_bind_flags_from_usage(XrSwapchainUsageFlags flags)
     return ret;
 }
 
-static void release_imported_d3d11_textures(XrSwapchainImageD3D11KHR *images,
-                                            uint32_t count)
+static void release_d3d_images(struct wine_XrSession *session,
+                               XrSwapchainImageBaseHeader *imported, uint32_t count)
 {
     uint32_t i;
-    for (i = 0; i < count; i++)
-        ID3D11Texture2D_Release(images[i].texture);
+
+    if (session->graphics_api == WINE_XR_D3D12)
+    {
+        XrSwapchainImageD3D12KHR *images = (XrSwapchainImageD3D12KHR *)imported;
+        for (i = 0; i < count; i++)
+            ID3D12Resource_Release(images[i].texture);
+    }
+    else
+    {
+        XrSwapchainImageD3D11KHR *images = (XrSwapchainImageD3D11KHR *)imported;
+        for (i = 0; i < count; i++)
+            ID3D11Texture2D_Release(images[i].texture);
+    }
 }
 
 static void release_d3d11_refs(struct wine_XrSession *sess)
@@ -359,8 +373,7 @@ static void session_teardown(struct wine_XrSession *session)
         if (session->graphics_api == WINE_XR_VULKAN)
             wine_destroy_vulkan_images(swapchain);
         else if (swapchain->images)
-            release_imported_d3d11_textures((XrSwapchainImageD3D11KHR *)swapchain->images,
-                                            swapchain->image_count);
+            release_d3d_images(session, swapchain->images, swapchain->image_count);
         free(swapchain->images);
         free(swapchain);
     }
@@ -377,6 +390,7 @@ static void session_teardown(struct wine_XrSession *session)
         UNIX_CALL(d3dmetal, &event);
     }
     release_d3d11_refs(session);
+    wine_destroy_d3d12_session(session);
     wine_destroy_vulkan_session(session);
 
     if (session->mtl_command_queue || session->mtl_device)
@@ -397,7 +411,7 @@ static XrResult create_session_d3d11(struct wine_XrInstance *wine_instance,
                                      XrSystemId system_id,
                                      struct wine_XrSession *wine_session)
 {
-    struct create_d3d11_session_params params;
+    struct create_metal_session_params params;
     NTSTATUS status;
     HRESULT hr;
 
@@ -433,10 +447,10 @@ static XrResult create_session_d3d11(struct wine_XrInstance *wine_instance,
     params.system_id = system_id;
     params.session = &wine_session->host_session;
 
-    status = UNIX_CALL(create_d3d11_session, &params);
+    status = UNIX_CALL(create_metal_session, &params);
     if (status)
     {
-        WINE_ERR("create_d3d11_session unix call failed: 0x%x\n", (unsigned)status);
+        WINE_ERR("create_metal_session unix call failed: 0x%x\n", (unsigned)status);
         release_d3d11_refs(wine_session);
         return XR_ERROR_RUNTIME_FAILURE;
     }
@@ -545,6 +559,7 @@ XrResult WINAPI xrCreateSession(XrInstance instance,
     struct wine_XrSession *wine_session;
     const XrBaseInStructure *chain;
     const XrGraphicsBindingD3D11KHR *d3d11_binding = NULL;
+    const XrGraphicsBindingD3D12KHR *d3d12_binding = NULL;
     const XrGraphicsBindingVulkanKHR *vulkan_binding = NULL;
     XrSystemId queried;
     XrResult result;
@@ -554,8 +569,7 @@ XrResult WINAPI xrCreateSession(XrInstance instance,
     if (!createInfo || !session)
         return XR_ERROR_VALIDATION_FAILURE;
 
-    /* Reject a second concurrent session up front. Checked again after
-     * create_session_d3d11 to catch a race with xrDestroyInstance */
+    /* Recheck after native admission to catch concurrent creation or destruction. */
     EnterCriticalSection(&primary_session_lock);
     if (primary_session)
     {
@@ -577,6 +591,11 @@ XrResult WINAPI xrCreateSession(XrInstance instance,
             d3d11_binding = (const XrGraphicsBindingD3D11KHR *)chain;
             break;
         }
+        if (chain->type == XR_TYPE_GRAPHICS_BINDING_D3D12_KHR)
+        {
+            d3d12_binding = (const XrGraphicsBindingD3D12KHR *)chain;
+            break;
+        }
         if (chain->type == XR_TYPE_GRAPHICS_BINDING_VULKAN_KHR)
         {
             vulkan_binding = (const XrGraphicsBindingVulkanKHR *)chain;
@@ -584,14 +603,13 @@ XrResult WINAPI xrCreateSession(XrInstance instance,
         }
     }
 
-    if (!d3d11_binding && !vulkan_binding)
+    if (!d3d11_binding && !d3d12_binding && !vulkan_binding)
     {
-        /* Probe systemId first so invalid systems return XR_ERROR_SYSTEM_INVALID
-         * before the missing D3D11 binding error */
+        /* Invalid systems take precedence over binding errors. */
         result = result_with_system_id_precedence(
             instance, createInfo->systemId, XR_ERROR_GRAPHICS_DEVICE_INVALID);
         if (result == XR_ERROR_GRAPHICS_DEVICE_INVALID)
-            WINE_ERR("No D3D11 or Vulkan graphics binding in createInfo->next chain\n");
+            WINE_ERR("No supported graphics binding in createInfo->next chain\n");
         else
             WINE_WARN("xrCreateSession failed: %d\n", result);
         return result;
@@ -599,6 +617,7 @@ XrResult WINAPI xrCreateSession(XrInstance instance,
 
     EnterCriticalSection(&primary_session_lock);
     queried = vulkan_binding ? wine_instance->vulkan_requirements_queried_for
+              : d3d12_binding ? wine_instance->d3d12_requirements_queried_for
                              : wine_instance->d3d11_requirements_queried_for;
     LeaveCriticalSection(&primary_session_lock);
 
@@ -617,16 +636,20 @@ XrResult WINAPI xrCreateSession(XrInstance instance,
         return XR_ERROR_OUT_OF_MEMORY;
 
     wine_session->instance = wine_instance;
-    wine_session->graphics_api = vulkan_binding ? WINE_XR_VULKAN : WINE_XR_D3D11;
+    wine_session->graphics_api = vulkan_binding ? WINE_XR_VULKAN
+                                : d3d12_binding ? WINE_XR_D3D12 : WINE_XR_D3D11;
     InitializeCriticalSection(&wine_session->swapchain_lock);
     wine_session->swapchain_list.next = &wine_session->swapchain_list;
     wine_session->swapchain_list.prev = &wine_session->swapchain_list;
 
-    result = vulkan_binding
-        ? wine_create_vulkan_session(wine_instance, vulkan_binding,
-                                      createInfo->systemId, wine_session)
-        : create_session_d3d11(wine_instance, d3d11_binding,
-                                createInfo->systemId, wine_session);
+    if (vulkan_binding)
+        result = wine_create_vulkan_session(wine_instance, vulkan_binding,
+                                            createInfo->systemId, wine_session);
+    else if (d3d12_binding)
+        result = wine_create_d3d12_session(wine_session, d3d12_binding, createInfo->systemId);
+    else
+        result = create_session_d3d11(wine_instance, d3d11_binding,
+                                     createInfo->systemId, wine_session);
     if (result != XR_SUCCESS)
     {
         WINE_WARN("xrCreateSession failed: %d\n", result);
@@ -708,6 +731,24 @@ XrResult WINAPI xrCreateSwapchain(XrSession session,
     struct xrCreateSwapchain_params params;
     NTSTATUS status;
 
+    if (!createInfo || !swapchain)
+        return XR_ERROR_VALIDATION_FAILURE;
+    if (wine_session->graphics_api == WINE_XR_D3D12 &&
+        ((createInfo->createFlags & XR_SWAPCHAIN_CREATE_PROTECTED_CONTENT_BIT) ||
+         createInfo->faceCount != 1 || createInfo->sampleCount != 1 ||
+         !createInfo->arraySize || createInfo->arraySize > UINT16_MAX ||
+         !createInfo->mipCount || createInfo->mipCount > UINT16_MAX ||
+         !(createInfo->usageFlags & (is_depth_dxgi_format(createInfo->format)
+             ? XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
+             : XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT))))
+    {
+        WINE_ERR("Unsupported D3D12 swapchain: flags=%#llx usage=%#llx faces=%u samples=%u arrays=%u mips=%u\n",
+                 (unsigned long long)createInfo->createFlags,
+                 (unsigned long long)createInfo->usageFlags, createInfo->faceCount,
+                 createInfo->sampleCount, createInfo->arraySize, createInfo->mipCount);
+        return XR_ERROR_FEATURE_UNSUPPORTED;
+    }
+
     wine_swapchain = calloc(1, sizeof(*wine_swapchain));
     if (!wine_swapchain)
         return XR_ERROR_OUT_OF_MEMORY;
@@ -774,14 +815,75 @@ XrResult WINAPI xrDestroySwapchain(XrSwapchain swapchain)
     if (wine_session->graphics_api == WINE_XR_VULKAN)
         wine_destroy_vulkan_images(wine_swapchain);
     else if (wine_swapchain->images)
-        release_imported_d3d11_textures((XrSwapchainImageD3D11KHR *)wine_swapchain->images,
-                                        wine_swapchain->image_count);
+        release_d3d_images(wine_session, wine_swapchain->images, wine_swapchain->image_count);
     free(wine_swapchain->images);
     free(wine_swapchain);
 
     if (status)
         return XR_ERROR_RUNTIME_FAILURE;
     return params.result;
+}
+
+static XrResult create_d3d11_image(struct wine_XrSwapchain *swapchain,
+                                   uint64_t metal_texture, ID3D11Texture2D **texture)
+{
+    struct wine_XrSession *session = swapchain->session;
+    D3D11_TEXTURE2D_DESC1 desc = {
+        .Width = swapchain->create_info.width,
+        .Height = swapchain->create_info.height,
+        .MipLevels = swapchain->create_info.mipCount ? swapchain->create_info.mipCount : 1,
+        .ArraySize = swapchain->create_info.arraySize ? swapchain->create_info.arraySize : 1,
+        .Format = (DXGI_FORMAT)dxgi_typeless_parent(swapchain->create_info.format),
+        .SampleDesc = {.Count = 1},
+        .Usage = D3D11_USAGE_DEFAULT,
+        .TextureLayout = D3D11_TEXTURE_LAYOUT_UNDEFINED,
+    };
+    HRESULT hr;
+
+    *texture = NULL;
+    desc.BindFlags = d3d11_bind_flags_from_usage(swapchain->create_info.usageFlags);
+    if (!desc.BindFlags)
+        desc.BindFlags = is_depth_dxgi_format(swapchain->create_info.format)
+            ? D3D11_BIND_DEPTH_STENCIL : (D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
+
+    if (session->dxmt_device)
+        hr = session->dxmt_device->lpVtbl->ImportMTLTexture2D(
+            session->dxmt_device, &desc, metal_texture, texture);
+    else
+    {
+        struct d3dmetal_params capture = {
+            .op = D3DMETAL_BEGIN_TEXTURE, .texture = metal_texture,
+        };
+        NTSTATUS status = UNIX_CALL(d3dmetal, &capture);
+        if (status || capture.result)
+        {
+            WINE_ERR("D3DMetal texture capture begin failed: status=0x%x result=%d\n",
+                     (unsigned)status, capture.result);
+            return XR_ERROR_RUNTIME_FAILURE;
+        }
+        else
+        {
+            D3D11_TEXTURE2D_DESC d3d_desc;
+            memcpy(&d3d_desc, &desc, sizeof(d3d_desc));
+            hr = ID3D11Device_CreateTexture2D(session->d3d11_device, &d3d_desc, NULL, texture);
+            capture.op = D3DMETAL_END;
+            status = UNIX_CALL(d3dmetal, &capture);
+            if (status || capture.result)
+            {
+                WINE_ERR("D3DMetal texture capture failed: status=0x%x result=%d seen=%u hr=0x%08x\n",
+                         (unsigned)status, capture.result, capture.seen, (unsigned)hr);
+                if (*texture) ID3D11Texture2D_Release(*texture);
+                *texture = NULL;
+                return XR_ERROR_RUNTIME_FAILURE;
+            }
+        }
+    }
+    if (FAILED(hr))
+    {
+        WINE_ERR("ImportMTLTexture2D failed: 0x%08x\n", (unsigned)hr);
+        return XR_ERROR_RUNTIME_FAILURE;
+    }
+    return XR_SUCCESS;
 }
 
 XrResult WINAPI xrEnumerateSwapchainImages(XrSwapchain swapchain,
@@ -791,6 +893,11 @@ XrResult WINAPI xrEnumerateSwapchainImages(XrSwapchain swapchain,
 {
     struct wine_XrSwapchain *wine_swapchain = wine_swapchain_from_handle(swapchain);
     struct wine_XrSession *wine_session = wine_swapchain->session;
+    size_t image_size = wine_session->graphics_api == WINE_XR_D3D12
+        ? sizeof(XrSwapchainImageD3D12KHR) : sizeof(XrSwapchainImageD3D11KHR);
+
+    if (!imageCountOutput || (imageCapacityInput && !images))
+        return XR_ERROR_VALIDATION_FAILURE;
 
     if (wine_session->graphics_api == WINE_XR_VULKAN)
         return wine_enumerate_vulkan_images(wine_swapchain, imageCapacityInput,
@@ -829,17 +936,13 @@ XrResult WINAPI xrEnumerateSwapchainImages(XrSwapchain swapchain,
         return enum_params.result;
     }
 
-    if (!wine_swapchain->images)
+    EnterCriticalSection(&wine_session->swapchain_lock);
     {
-        /* Serialize first-fill against a concurrent caller on the same
-         * swapchain. Double-checked after acquiring, and ImportMTLTexture2D
-         * runs inside the lock so observers see a consistent set */
-        EnterCriticalSection(&wine_session->swapchain_lock);
         if (!wine_swapchain->images)
         {
             struct export_metal_textures_params mt_params;
             uint64_t *mtl_textures;
-            XrSwapchainImageD3D11KHR *d3d11_images;
+            XrSwapchainImageBaseHeader *imported;
             NTSTATUS status;
             uint32_t i;
 
@@ -874,8 +977,8 @@ XrResult WINAPI xrEnumerateSwapchainImages(XrSwapchain swapchain,
                 return mt_params.result;
             }
 
-            d3d11_images = calloc(mt_params.image_count, sizeof(*d3d11_images));
-            if (!d3d11_images)
+            imported = calloc(mt_params.image_count, image_size);
+            if (!imported)
             {
                 free(mtl_textures);
                 LeaveCriticalSection(&wine_session->swapchain_lock);
@@ -884,119 +987,54 @@ XrResult WINAPI xrEnumerateSwapchainImages(XrSwapchain swapchain,
 
             for (i = 0; i < mt_params.image_count; i++)
             {
-                D3D11_TEXTURE2D_DESC1 desc;
-                ID3D11Texture2D *texture = NULL;
-                HRESULT hr;
+                XrResult result;
 
-                memset(&desc, 0, sizeof(desc));
-                desc.Width = mt_params.width;
-                desc.Height = mt_params.height;
-                /* Must match the MTLTexture's mipmapLevelCount; Monado's Metal
-                 * allocator honors create_info.mipCount, and DXMT's
-                 * ImportMTLTexture2D rejects the import on any mismatch */
-                desc.MipLevels = wine_swapchain->create_info.mipCount
-                    ? wine_swapchain->create_info.mipCount : 1;
-                desc.ArraySize = mt_params.array_size ? mt_params.array_size : 1;
-                desc.Format = (DXGI_FORMAT)dxgi_typeless_parent(mt_params.dxgi_format);
-                desc.SampleDesc.Count = 1;
-                desc.SampleDesc.Quality = 0;
-                desc.Usage = D3D11_USAGE_DEFAULT;
-                desc.CPUAccessFlags = 0;
-                desc.MiscFlags = 0;
-                desc.TextureLayout = D3D11_TEXTURE_LAYOUT_UNDEFINED;
-
-                /* Fall back only when no app usage bit maps to a D3D11 bind flag */
-                desc.BindFlags = d3d11_bind_flags_from_usage(
-                    wine_swapchain->create_info.usageFlags);
-                if (!desc.BindFlags)
+                if (wine_session->graphics_api == WINE_XR_D3D12)
                 {
-                    desc.BindFlags = is_depth_dxgi_format(mt_params.dxgi_format)
-                        ? D3D11_BIND_DEPTH_STENCIL
-                        : (D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
+                    XrSwapchainImageD3D12KHR *image = (XrSwapchainImageD3D12KHR *)imported + i;
+                    image->type = XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR;
+                    result = wine_create_d3d12_image(wine_swapchain, mtl_textures[i], &image->texture);
                 }
-
-                if (wine_session->dxmt_device)
-                    hr = wine_session->dxmt_device->lpVtbl->ImportMTLTexture2D(
-                        wine_session->dxmt_device, &desc, mtl_textures[i], &texture);
                 else
                 {
-                    struct d3dmetal_params capture = {
-                        .op = D3DMETAL_BEGIN_TEXTURE, .texture = mtl_textures[i],
-                    };
-                    status = UNIX_CALL(d3dmetal, &capture);
-                    if (status || capture.result)
-                    {
-                        WINE_ERR("D3DMetal texture capture begin failed: status=0x%x result=%d\n",
-                                 (unsigned)status, capture.result);
-                        hr = E_FAIL;
-                    }
-                    else
-                    {
-                        D3D11_TEXTURE2D_DESC d3d_desc;
-                        memcpy(&d3d_desc, &desc, sizeof(d3d_desc));
-                        hr = ID3D11Device_CreateTexture2D(wine_session->d3d11_device,
-                                                        &d3d_desc, NULL, &texture);
-                        capture.op = D3DMETAL_END;
-                        status = UNIX_CALL(d3dmetal, &capture);
-                        if (status || capture.result)
-                        {
-                            WINE_ERR("D3DMetal texture capture failed: status=0x%x result=%d seen=%u hr=0x%08x\n",
-                                     (unsigned)status, capture.result, capture.seen, (unsigned)hr);
-                            if (texture) ID3D11Texture2D_Release(texture);
-                            texture = NULL;
-                            hr = E_FAIL;
-                        }
-                    }
+                    XrSwapchainImageD3D11KHR *image = (XrSwapchainImageD3D11KHR *)imported + i;
+                    image->type = XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR;
+                    result = create_d3d11_image(wine_swapchain, mtl_textures[i], &image->texture);
                 }
-                if (FAILED(hr))
+                if (result != XR_SUCCESS)
                 {
-                    WINE_ERR("ImportMTLTexture2D failed for image %u: 0x%08x\n",
-                             i, (unsigned)hr);
-                    release_imported_d3d11_textures(d3d11_images, i);
-                    free(d3d11_images);
+                    WINE_ERR("D3D image import failed: index=%u result=%d\n", i, result);
+                    release_d3d_images(wine_session, imported, i);
+                    free(imported);
                     free(mtl_textures);
                     LeaveCriticalSection(&wine_session->swapchain_lock);
-                    return XR_ERROR_RUNTIME_FAILURE;
+                    return result;
                 }
-
-                d3d11_images[i].type = XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR;
-                d3d11_images[i].next = NULL;
-                d3d11_images[i].texture = texture;
-
-                WINE_TRACE("Imported D3D11 texture %p from MTLTexture 0x%llx "
-                           "(index %u)\n",
-                           texture, (unsigned long long)mtl_textures[i], i);
+                WINE_TRACE("Imported D3D image %u from MTLTexture 0x%llx\n",
+                           i, (unsigned long long)mtl_textures[i]);
             }
 
             free(mtl_textures);
 
             wine_swapchain->image_count = mt_params.image_count;
-            wine_swapchain->images = (XrSwapchainImageBaseHeader *)d3d11_images;
+            wine_swapchain->images = imported;
         }
-        LeaveCriticalSection(&wine_session->swapchain_lock);
     }
 
     {
-        XrSwapchainImageD3D11KHR *d3d11_images =
-            (XrSwapchainImageD3D11KHR *)wine_swapchain->images;
-        XrSwapchainImageD3D11KHR *out = (XrSwapchainImageD3D11KHR *)images;
         uint32_t copy_count = wine_swapchain->image_count;
-        uint32_t i;
 
         if (copy_count > imageCapacityInput)
         {
             *imageCountOutput = copy_count;
+            LeaveCriticalSection(&wine_session->swapchain_lock);
             return XR_ERROR_SIZE_INSUFFICIENT;
         }
 
-        for (i = 0; i < copy_count; i++)
-        {
-            out[i].type = d3d11_images[i].type;
-            out[i].next = d3d11_images[i].next;
-            out[i].texture = d3d11_images[i].texture;
-        }
+        memcpy(images, wine_swapchain->images, copy_count * image_size);
 
         *imageCountOutput = copy_count;
+        LeaveCriticalSection(&wine_session->swapchain_lock);
         return XR_SUCCESS;
     }
 }
@@ -1011,7 +1049,7 @@ XrResult WINAPI xrReleaseSwapchainImage(XrSwapchain swapchain,
     };
     NTSTATUS status;
 
-    if (wine_session->gpu_fence && wine_session->d3d11_context4) {
+    if (wine_session->gpu_fence || wine_session->d3d12_fence) {
         LONGLONG value;
         HRESULT hr;
 
@@ -1022,13 +1060,16 @@ XrResult WINAPI xrReleaseSwapchainImage(XrSwapchain swapchain,
             return XR_ERROR_LIMIT_REACHED;
         }
         value = wine_session->gpu_fence_value + 1;
-        hr = wine_session->d3d11_context4->lpVtbl->Signal(
-            wine_session->d3d11_context4,
-            (ID3D11Fence *)wine_session->gpu_fence, value);
+        if (wine_session->graphics_api == WINE_XR_D3D12)
+            hr = ID3D12CommandQueue_Signal(wine_session->d3d12_queue,
+                                          wine_session->d3d12_fence, value);
+        else
+            hr = wine_session->d3d11_context4->lpVtbl->Signal(
+                wine_session->d3d11_context4, wine_session->gpu_fence, value);
         if (SUCCEEDED(hr))
         {
             wine_session->gpu_fence_value = value;
-            if (!wine_session->dxmt_device)
+            if (wine_session->graphics_api == WINE_XR_D3D11 && !wine_session->dxmt_device)
                 ID3D11DeviceContext_Flush(wine_session->d3d11_context);
         }
         LeaveCriticalSection(&wine_session->swapchain_lock);
@@ -1398,6 +1439,37 @@ XrResult WINAPI xrGetD3D11GraphicsRequirementsKHR(XrInstance instance,
             return params.result;
         EnterCriticalSection(&primary_session_lock);
         wine_instance->d3d11_requirements_queried_for = systemId;
+        LeaveCriticalSection(&primary_session_lock);
+    }
+    return params.result;
+}
+
+XrResult WINAPI xrGetD3D12GraphicsRequirementsKHR(XrInstance instance,
+                                                 XrSystemId systemId,
+                                                 XrGraphicsRequirementsD3D12KHR *graphicsRequirements)
+{
+    struct wine_XrInstance *wine_instance = wine_instance_from_handle(instance);
+    struct xrGetD3D12GraphicsRequirementsKHR_params params = {
+        .instance = instance, .systemId = systemId,
+        .graphicsRequirements = graphicsRequirements,
+    };
+    NTSTATUS status;
+
+    if (!graphicsRequirements || graphicsRequirements->type != XR_TYPE_GRAPHICS_REQUIREMENTS_D3D12_KHR)
+        return XR_ERROR_VALIDATION_FAILURE;
+    status = UNIX_CALL(xrGetD3D12GraphicsRequirementsKHR, &params);
+    if (status)
+    {
+        WINE_ERR("xrGetD3D12GraphicsRequirementsKHR unix call failed: 0x%x\n", (unsigned)status);
+        return XR_ERROR_RUNTIME_FAILURE;
+    }
+    if (params.result == XR_SUCCESS)
+    {
+        params.result = match_dxgi_adapter(&graphicsRequirements->adapterLuid);
+        if (params.result != XR_SUCCESS)
+            return params.result;
+        EnterCriticalSection(&primary_session_lock);
+        wine_instance->d3d12_requirements_queried_for = systemId;
         LeaveCriticalSection(&primary_session_lock);
     }
     return params.result;

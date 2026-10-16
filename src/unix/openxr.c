@@ -7,6 +7,7 @@
 
 #define XR_USE_GRAPHICS_API_METAL
 #define XR_USE_GRAPHICS_API_D3D11
+#define XR_USE_GRAPHICS_API_D3D12
 #define XR_USE_PLATFORM_WIN32
 #define XR_USE_TIMESPEC
 
@@ -44,6 +45,14 @@ NTSTATUS wine_init(void *args)
 static BOOL extension_is_supported(const char *name)
 {
     uint32_t i;
+    const char *backend;
+
+    if (!strcmp(name, "XR_KHR_D3D12_enable"))
+    {
+        backend = getenv("CX_GRAPHICS_BACKEND");
+        if (!backend || strcmp(backend, "d3dmetal"))
+            return FALSE;
+    }
     for (i = 0; i < ARRAY_SIZE(xr_bridge_extensions); i++)
         if (!strcmp(name, xr_bridge_extensions[i]))
             return TRUE;
@@ -108,7 +117,7 @@ static uint32_t apply_substitutions(const XrExtensionProperties *native_list,
             if (!sub->native_ext || strcmp(native->extensionName, sub->native_ext))
                 continue;
 
-            if (sub->win32_ext)
+            if (sub->win32_ext && extension_is_supported(sub->win32_ext))
                 emit_extension(out, out_cap, &output_count,
                                native, sub->win32_ext, sub->version);
             handled = TRUE;
@@ -432,7 +441,7 @@ NTSTATUS wine_xrCreateSwapchain(void *args)
     return STATUS_SUCCESS;
 }
 
-/* PE calls unix_create_d3d11_session instead of unix_xrCreateSession so the
+/* PE calls unix_create_metal_session instead of unix_xrCreateSession so the
  * D3D11 binding gets substituted for a Metal one on the Unix side. A direct
  * xrCreateSession dispatch would bypass that substitution and fail at native
  * session create. The stub exists so the __wine_unix_call_funcs slot is
@@ -441,7 +450,7 @@ NTSTATUS wine_xrCreateSession(void *args)
 {
     struct xrCreateSession_params *params = args;
     WARN("Direct wine_xrCreateSession dispatch is not supported; "
-         "PE side must use unix_create_d3d11_session\n");
+             "PE side must use unix_create_metal_session\n");
     params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
     return STATUS_SUCCESS;
 }

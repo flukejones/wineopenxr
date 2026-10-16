@@ -19,6 +19,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(openxr);
  * content that clashes with Metal.h */
 typedef struct { long long QuadPart; } LARGE_INTEGER;
 #define XR_USE_GRAPHICS_API_D3D11 1
+#define XR_USE_GRAPHICS_API_D3D12 1
 #define XR_USE_GRAPHICS_API_METAL 1
 #define XR_USE_PLATFORM_WIN32 1
 #define XR_USE_TIMESPEC 1
@@ -38,10 +39,12 @@ typedef struct IUnknown IUnknown;
 
 extern struct openxr_instance_funcs g_xr_host_instance_dispatch_table;
 
-NTSTATUS wine_create_d3d11_session(void *args)
+enum { MIN_D3D_FEATURE_LEVEL = 0xb000 };
+
+NTSTATUS wine_create_metal_session(void *args)
 {
     @autoreleasepool {
-        struct create_d3d11_session_params *params = args;
+        struct create_metal_session_params *params = args;
         struct wine_XrInstance *wine_instance = wine_instance_from_handle(params->instance);
         XrInstance host_instance = wine_instance->host_instance;
         struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
@@ -131,46 +134,61 @@ NTSTATUS wine_release_metal_session(void *args)
     }
 }
 
+static XrResult d3d_adapter_luid(XrInstance instance, XrSystemId system_id, LUID *luid)
+{
+    struct wine_XrInstance *wine_instance = wine_instance_from_handle(instance);
+    struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
+    XrGraphicsRequirementsMetalKHR metal_reqs = {
+        .type = XR_TYPE_GRAPHICS_REQUIREMENTS_METAL_KHR,
+    };
+    uint64_t swapped;
+    XrResult result;
+
+    if (!funcs->p_xrGetMetalGraphicsRequirementsKHR)
+        return XR_ERROR_FUNCTION_UNSUPPORTED;
+    result = funcs->p_xrGetMetalGraphicsRequirementsKHR(
+        wine_instance->host_instance, system_id, &metal_reqs);
+    if (result != XR_SUCCESS)
+        return result;
+    if (!metal_reqs.metalDevice)
+    {
+        WINE_ERR("metalDevice is NULL from requirements\n");
+        return XR_ERROR_RUNTIME_FAILURE;
+    }
+    /* DXMT's LUID encodes the byte-swapped Metal registry ID. */
+    swapped = __builtin_bswap64([(id<MTLDevice>)metal_reqs.metalDevice registryID]);
+    memcpy(luid, &swapped, sizeof(swapped));
+    return XR_SUCCESS;
+}
+
 NTSTATUS wine_xrGetD3D11GraphicsRequirementsKHR(void *args)
 {
     @autoreleasepool {
         struct xrGetD3D11GraphicsRequirementsKHR_params *params = args;
-        struct wine_XrInstance *wine_instance = wine_instance_from_handle(params->instance);
-        struct openxr_instance_funcs *funcs = &g_xr_host_instance_dispatch_table;
-        XrGraphicsRequirementsMetalKHR metal_reqs = {
-            .type = XR_TYPE_GRAPHICS_REQUIREMENTS_METAL_KHR,
-        };
-
-        if (!funcs->p_xrGetMetalGraphicsRequirementsKHR)
-        {
-            params->result = XR_ERROR_FUNCTION_UNSUPPORTED;
-            return STATUS_SUCCESS;
-        }
-
-        params->result = funcs->p_xrGetMetalGraphicsRequirementsKHR(
-            wine_instance->host_instance, params->systemId, &metal_reqs);
-
+        params->result = d3d_adapter_luid(params->instance, params->systemId,
+                                        &params->graphicsRequirements->adapterLuid);
         if (params->result == XR_SUCCESS)
         {
             params->graphicsRequirements->type = XR_TYPE_GRAPHICS_REQUIREMENTS_D3D11_KHR;
-            params->graphicsRequirements->minFeatureLevel = 0xb000; /* D3D_FEATURE_LEVEL_11_0 */
-
-            if (metal_reqs.metalDevice)
-            {
-                /* DXMT bit-casts bswap64(MTLDevice.registryID) into LUID */
-                uint64_t reg_id = [(id<MTLDevice>)metal_reqs.metalDevice registryID];
-                uint64_t swapped = __builtin_bswap64(reg_id);
-                memcpy(&params->graphicsRequirements->adapterLuid, &swapped, sizeof(swapped));
-            }
-            else
-            {
-                WINE_ERR("metalDevice is NULL from requirements\n");
-                params->result = XR_ERROR_RUNTIME_FAILURE;
-            }
+            params->graphicsRequirements->minFeatureLevel = MIN_D3D_FEATURE_LEVEL;
         }
-
-        return STATUS_SUCCESS;
     }
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS wine_xrGetD3D12GraphicsRequirementsKHR(void *args)
+{
+    @autoreleasepool {
+        struct xrGetD3D12GraphicsRequirementsKHR_params *params = args;
+        params->result = d3d_adapter_luid(params->instance, params->systemId,
+                                        &params->graphicsRequirements->adapterLuid);
+        if (params->result == XR_SUCCESS)
+        {
+            params->graphicsRequirements->type = XR_TYPE_GRAPHICS_REQUIREMENTS_D3D12_KHR;
+            params->graphicsRequirements->minFeatureLevel = MIN_D3D_FEATURE_LEVEL;
+        }
+    }
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS wine_export_metal_textures(void *args)
@@ -232,11 +250,6 @@ NTSTATUS wine_export_metal_textures(void *args)
         free(metal_images);
 
         params->image_count = count;
-        params->width = wine_swapchain->create_info.width;
-        params->height = wine_swapchain->create_info.height;
-        params->array_size = wine_swapchain->create_info.arraySize;
-        params->dxgi_format = wine_swapchain->create_info.format;
-
         params->result = XR_SUCCESS;
         return STATUS_SUCCESS;
     }

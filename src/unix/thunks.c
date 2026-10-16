@@ -2,6 +2,7 @@
 
 #define XR_USE_GRAPHICS_API_METAL
 #define XR_USE_GRAPHICS_API_D3D11
+#define XR_USE_GRAPHICS_API_D3D12
 #define XR_USE_PLATFORM_WIN32
 #define XR_USE_TIMESPEC
 
@@ -22,7 +23,7 @@
 extern struct openxr_instance_funcs g_xr_host_instance_dispatch_table;
 
 extern NTSTATUS wine_init(void *args);
-extern NTSTATUS wine_create_d3d11_session(void *args);
+extern NTSTATUS wine_create_metal_session(void *args);
 extern NTSTATUS wine_release_metal_session(void *args);
 extern NTSTATUS wine_export_metal_textures(void *args);
 extern NTSTATUS wine_vulkan_requirements(void *args);
@@ -40,6 +41,7 @@ extern NTSTATUS wine_xrEndFrame(void *args);
 extern NTSTATUS wine_xrEnumerateInstanceExtensionProperties(void *args);
 extern NTSTATUS wine_xrEnumerateSwapchainFormats(void *args);
 extern NTSTATUS wine_xrGetD3D11GraphicsRequirementsKHR(void *args);
+extern NTSTATUS wine_xrGetD3D12GraphicsRequirementsKHR(void *args);
 extern NTSTATUS wine_xrReleaseSwapchainImage(void *args);
 
 static NTSTATUS thunk_xrAcquireSwapchainImage(void *args)
@@ -828,7 +830,7 @@ const unsigned int openxr_instance_function_count =
 const unixlib_entry_t __wine_unix_call_funcs[] =
 {
     wine_init,
-    wine_create_d3d11_session,
+    wine_create_metal_session,
     wine_release_metal_session,
     wine_export_metal_textures,
     wine_vulkan_requirements,
@@ -876,6 +878,7 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
     thunk_xrGetActionStateVector2f,
     thunk_xrGetCurrentInteractionProfile,
     wine_xrGetD3D11GraphicsRequirementsKHR,
+    wine_xrGetD3D12GraphicsRequirementsKHR,
     thunk_xrGetDisplayRefreshRateFB,
     thunk_xrGetInputSourceLocalizedName,
     thunk_xrGetInstanceProperties,

@@ -16,6 +16,10 @@ typedef struct ID3D11Texture2D ID3D11Texture2D;
 #endif
 typedef struct ID3D11DeviceContext4 ID3D11DeviceContext4;
 typedef struct ID3D11Fence ID3D11Fence;
+typedef struct ID3D12Device ID3D12Device;
+typedef struct ID3D12CommandQueue ID3D12CommandQueue;
+typedef struct ID3D12Fence ID3D12Fence;
+typedef struct ID3D12Resource ID3D12Resource;
 #ifndef __d3dcommon_h__
 typedef int D3D_FEATURE_LEVEL;
 #endif
@@ -64,7 +68,7 @@ struct init_params
     NTSTATUS result;
 };
 
-struct create_d3d11_session_params
+struct create_metal_session_params
 {
     XrInstance instance;
     XrSystemId system_id;
@@ -85,10 +89,6 @@ struct export_metal_textures_params
     XrSwapchain swapchain;
     uint32_t image_count;         /* capacity in, actual count out */
     uint64_t *mtl_textures;       /* borrowed id<MTLTexture> pointers, valid while swapchain lives */
-    uint32_t width;
-    uint32_t height;
-    uint32_t array_size;
-    int64_t dxgi_format;
     XrResult result;
 };
 
@@ -140,14 +140,9 @@ struct wine_XrInstance
      * than producing an orphan */
     int destroying;
 
-    /* Last systemId for which xrGetD3D11GraphicsRequirementsKHR succeeded, or
-     * XR_NULL_SYSTEM_ID if never called. xrCreateSession requires the app to
-     * call xrGet*GraphicsRequirements* for the graphics API and systemId it
-     * binds. Monado would enforce this natively, but src/unix/session.m calls
-     * xrGetMetalGraphicsRequirementsKHR inside wine_create_d3d11_session and
-     * flips Monado's gotten_requirements, so the bridge must track it before
-     * that call. Read and written under primary_session_lock */
+    /* Last successful requirements system per API; guarded by primary_session_lock. */
     XrSystemId d3d11_requirements_queried_for;
+    XrSystemId d3d12_requirements_queried_for;
     XrSystemId vulkan_requirements_queried_for;
     VkInstance vulkan_instance;
     VkPhysicalDevice vulkan_physical_device;
@@ -160,7 +155,7 @@ struct wine_XrSession
 {
     XrSession host_session;
     struct wine_XrInstance *instance;
-    enum { WINE_XR_D3D11, WINE_XR_VULKAN } graphics_api;
+    enum { WINE_XR_D3D11, WINE_XR_D3D12, WINE_XR_VULKAN } graphics_api;
     struct wine_vulkan_session *vulkan;
 
     void *mtl_device;          /* id<MTLDevice>, owned +1 reference */
@@ -170,6 +165,9 @@ struct wine_XrSession
     ID3D11Device         *d3d11_device;
     ID3D11DeviceContext  *d3d11_context;
     ID3D11DeviceContext4 *d3d11_context4;   /* cached to avoid per-release QueryInterface */
+    ID3D12Device         *d3d12_device;
+    ID3D12CommandQueue   *d3d12_queue;
+    ID3D12Fence          *d3d12_fence;
 
     ID3D11Fence *gpu_fence;                 /* keeps the MTLSharedEvent behind mtl_shared_event alive */
     int64_t gpu_fence_value;                /* monotonic, guarded by swapchain_lock */

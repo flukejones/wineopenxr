@@ -33,6 +33,8 @@ struct extension_substitution {
 static const struct extension_substitution substitute_extensions[] = {
     {"XR_KHR_D3D11_enable", "XR_KHR_metal_enable",
      XR_KHR_D3D11_enable_SPEC_VERSION},
+    {"XR_KHR_D3D12_enable", "XR_KHR_metal_enable",
+     XR_KHR_D3D12_enable_SPEC_VERSION},
     {"XR_KHR_vulkan_enable", "XR_KHR_metal_enable",
      XR_KHR_vulkan_enable_SPEC_VERSION},
     {"XR_KHR_vulkan_enable2", "XR_KHR_metal_enable",
